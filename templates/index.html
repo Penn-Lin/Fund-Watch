@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#e0342f">
+<title>基金涨跌监控</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ===== App 头部 ===== -->
+  <header class="app-header">
+    <div class="header-row">
+      <div class="brand">
+        <span class="brand-logo">📈</span>
+        <div>
+          <div class="brand-title">基金涨跌监控</div>
+          <div class="brand-sub" id="last-scan">等待数据…</div>
+        </div>
+      </div>
+      <button id="btn-refresh" class="icon-btn" title="立即刷新">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+      </button>
+    </div>
+    <div id="summary" class="summary-bar">
+      <div class="sum-item"><span class="sum-num" id="sum-funds">0</span><span class="sum-label">监控中</span></div>
+      <div class="sum-item"><span class="sum-num up" id="sum-up">0</span><span class="sum-label">上涨</span></div>
+      <div class="sum-item"><span class="sum-num down" id="sum-down">0</span><span class="sum-label">下跌</span></div>
+      <div class="sum-item"><span class="sum-num" id="sum-alerts">0</span><span class="sum-label">今日提醒</span></div>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===== 监控列表 ===== -->
+    <section id="tab-monitor" class="tab-panel active">
+      <div class="add-card">
+        <input id="add-code" type="tel" maxlength="6" placeholder="输入 6 位基金代码" inputmode="numeric">
+        <button id="btn-add" class="btn-primary">添加</button>
+      </div>
+      <div id="fund-list" class="fund-list"></div>
+      <p class="foot-note">点击基金卡片查看走势详情 · 数据来自东方财富</p>
+    </section>
+
+    <!-- ===== 规则设置 ===== -->
+    <section id="tab-rules" class="tab-panel">
+      <div class="card">
+        <div class="card-head">
+          <h2>全局规则</h2>
+          <span class="card-badge">所有基金生效</span>
+        </div>
+        <div class="form-block">
+          <div class="form-title">当日涨跌预警</div>
+          <div class="form-row">
+            <span class="form-label">阈值 ±%</span>
+            <input id="g-daily-th" type="number" step="0.1" min="0.1" value="2">
+            <label class="switch"><input id="g-daily-on" type="checkbox" checked><i></i></label>
+          </div>
+        </div>
+        <div class="form-block">
+          <div class="form-title">累计涨跌节点</div>
+          <div class="form-row">
+            <span class="form-label">步长 %</span>
+            <input id="g-cum-th" type="number" step="0.1" min="0.1" value="4">
+          </div>
+          <div class="form-row">
+            <span class="form-label">方向</span>
+            <select id="g-cum-dir">
+              <option value="both">涨跌双向</option>
+              <option value="up">仅上涨</option>
+              <option value="down">仅下跌</option>
+            </select>
+            <label class="switch"><input id="g-cum-on" type="checkbox" checked><i></i></label>
+          </div>
+          <p class="hint">累计达到步长即提醒，并从该点重新计算下一段</p>
+        </div>
+        <button id="btn-save-global" class="btn-primary btn-block">保存全局规则</button>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>单只基金独立规则</h2>
+          <span class="card-badge">优先于全局</span>
+        </div>
+        <div id="fund-rules" class="fund-rules"></div>
+      </div>
+    </section>
+
+    <!-- ===== 监控记录 ===== -->
+    <section id="tab-alerts" class="tab-panel">
+      <div class="chip-row" id="alert-filter-row">
+        <button class="chip active" data-code="">全部</button>
+      </div>
+      <div id="alert-list" class="alert-list"></div>
+    </section>
+
+    <!-- ===== 通知设置 ===== -->
+    <section id="tab-notify" class="tab-panel">
+      <div class="card">
+        <div class="card-head"><h2>微信推送</h2></div>
+        <p class="hint">Server酱 SendKey 见 sct.ftqq.com；PushPlus Token 见 pushplus.plus。填一个即可。</p>
+        <div class="form-block">
+          <div class="form-title">Server酱 SendKey</div>
+          <input id="cf-sk" type="text" placeholder="SCT...">
+        </div>
+        <div class="form-block">
+          <div class="form-title">PushPlus Token</div>
+          <input id="cf-pt" type="text" placeholder="留空则不用">
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>邮件提醒</h2></div>
+        <p class="hint">QQ/163 邮箱需用「授权码」而非登录密码</p>
+        <div class="form-block">
+          <div class="form-title">SMTP 服务器</div>
+          <input id="cf-host" type="text" placeholder="smtp.qq.com">
+        </div>
+        <div class="form-row">
+          <span class="form-label">端口</span>
+          <input id="cf-port" type="number" value="465">
+        </div>
+        <div class="form-block">
+          <div class="form-title">用户名 / 发件邮箱</div>
+          <input id="cf-user" type="text">
+        </div>
+        <div class="form-block">
+          <div class="form-title">授权码 / 密码</div>
+          <input id="cf-pass" type="password">
+        </div>
+        <div class="form-block">
+          <div class="form-title">收件邮箱（多个用逗号分隔）</div>
+          <input id="cf-to" type="text">
+        </div>
+        <div class="form-row">
+          <span class="form-label">SSL</span>
+          <label class="switch"><input id="cf-ssl" type="checkbox" checked><i></i></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>扫描频率（秒）</h2></div>
+        <div class="form-row">
+          <span class="form-label">盘中</span>
+          <input id="cf-in" type="number" value="60" min="10">
+        </div>
+        <div class="form-row">
+          <span class="form-label">盘后/休市</span>
+          <input id="cf-off" type="number" value="600" min="30">
+        </div>
+      </div>
+
+      <div class="btn-col">
+        <button id="btn-save-cfg" class="btn-primary">保存设置</button>
+        <button id="btn-test-notify" class="btn-ghost">发送测试提醒</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===== 底部导航 ===== -->
+  <nav class="tabbar">
+    <button class="tab active" data-tab="monitor">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg>
+      <span>监控</span>
+    </button>
+    <button class="tab" data-tab="rules">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2" fill="#fff"/><circle cx="15" cy="12" r="2" fill="#fff"/><circle cx="7" cy="17" r="2" fill="#fff"/></svg>
+      <span>规则</span>
+    </button>
+    <button class="tab" data-tab="alerts">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+      <span>记录</span>
+    </button>
+    <button class="tab" data-tab="notify">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="m2 7 10 6 10-6"/></svg>
+      <span>通知</span>
+    </button>
+  </nav>
+</div>
+
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

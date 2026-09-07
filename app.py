@@ -1,0 +1,474 @@
+# -*- coding: utf-8 -*-
+"""Flask 后端 + 后台常驻调度线程"""
+import os
+import json
+import threading
+import time
+import datetime
+
+from flask import Flask, jsonify, request, render_template
+
+import database
+import fund_data
+import rule_engine
+import notifier
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
+
+app = Flask(__name__)
+
+
+def load_config():
+    """配置存数据库（云端实例重启不丢）；首次启动以 config.json / 默认值初始化"""
+    cfg = database.get_config()
+    if cfg is not None:
+        return cfg
+    cfg = dict(database.DEFAULT_CONFIG)
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                cfg.update(json.load(f))
+        except Exception:
+            pass
+    database.save_config(cfg)
+    return cfg
+
+
+def save_config(cfg):
+    database.save_config(cfg)
+
+
+def scan_once():
+    """抓取所有启用基金数据 -> 评估规则 -> 发通知，返回 (抓取数, 提醒数)"""
+    cfg = load_config()
+    fetched = 0
+    conn = database.get_conn()
+    # 清理 90 天前的历史快照，控制数据量
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=90)
+              ).strftime('%Y-%m-%d %H:%M:%S')
+    conn.execute('DELETE FROM nav_history WHERE fetched_at < ?', (cutoff,))
+    conn.commit()
+    funds = conn.execute(
+        'SELECT * FROM funds WHERE enabled=1').fetchall()
+    codes = [f['code'] for f in funds]
+    conn.close()
+    if codes:
+        try:
+            data_list = fund_data.fetch_funds(codes)
+        except Exception:
+            data_list = []
+        for d in data_list:
+            try:
+                conn = database.get_conn()
+                conn.execute(
+                    'INSERT INTO nav_history (code, nav_date, unit_nav, acc_nav, '
+                    'actual_change, estimated_nav, estimated_change, gztime, fetched_at) '
+                    'VALUES (?,?,?,?,?,?,?,?,?)',
+                    (d['code'], d['nav_date'], d['unit_nav'], d['acc_nav'],
+                     d['actual_change'], d['estimated_nav'], d['estimated_change'],
+                     d['gztime'], rule_engine.now_str()))
+                conn.commit()
+                conn.close()
+                fetched += 1
+            except Exception:
+                pass
+
+    alerts = rule_engine.evaluate_all()
+    for a in alerts:
+        conn = database.get_conn()
+        cur = conn.execute(
+            'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
+            'current_change, trigger_time, message, notify_status) '
+            'VALUES (?,?,?,?,?,?,?,?,?)',
+            (a['code'], a['name'], a['rule_type'], a['direction'], a['kind'],
+             a['current_change'], rule_engine.now_str(), a['message'], 'pending'))
+        aid = cur.lastrowid
+        conn.commit()
+        conn.close()
+
+        result = notifier.send_alert(cfg, '基金涨跌提醒', a['message'])
+        status = 'sent' if result['ok'] else 'failed'
+        conn = database.get_conn()
+        conn.execute('UPDATE alert_log SET notify_status=? WHERE id=?', (status, aid))
+        conn.commit()
+        conn.close()
+    return fetched, len(alerts)
+
+
+def _interval():
+    now = datetime.datetime.now()
+    if rule_engine.is_trading_day(now) and rule_engine.is_market_hours(now):
+        return int(load_config().get('scan_interval_seconds', 60))
+    return int(load_config().get('off_hours_interval_seconds', 600))
+
+
+def scheduler_loop():
+    while True:
+        try:
+            scan_once()
+        except Exception as e:
+            print('scan error:', e)
+        try:
+            time.sleep(_interval())
+        except Exception:
+            time.sleep(60)
+
+
+# ------------------------- 页面 -------------------------
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+
+# ------------------------- 基金 CRUD -------------------------
+
+@app.route('/api/funds')
+def api_funds():
+    conn = database.get_conn()
+    funds = conn.execute('SELECT * FROM funds ORDER BY id').fetchall()
+    out = []
+    for f in funds:
+        item = dict(f)
+        last = conn.execute(
+            'SELECT * FROM nav_history WHERE code=? ORDER BY id DESC LIMIT 1',
+            (f['code'],)).fetchone()
+        if last:
+            daily_change = (last['estimated_change']
+                            if last['estimated_change'] is not None
+                            else last['actual_change'])
+            item.update({
+                'nav_date': last['nav_date'], 'unit_nav': last['unit_nav'],
+                'acc_nav': last['acc_nav'],
+                'estimated_nav': last['estimated_nav'],
+                'estimated_change': last['estimated_change'],
+                'actual_change': last['actual_change'],
+                'gztime': last['gztime'], 'daily_change': daily_change,
+            })
+        else:
+            item.update({'nav_date': None, 'unit_nav': None, 'acc_nav': None,
+                         'estimated_nav': None, 'estimated_change': None,
+                         'actual_change': None, 'gztime': None, 'daily_change': None})
+        # 累计规则基准（基金级优先，否则全局）
+        cum_rule = conn.execute(
+            "SELECT * FROM rules WHERE rule_type='cumulative' AND enabled=1 AND code=? "
+            "ORDER BY id LIMIT 1", (f['code'],)).fetchone()
+        if not cum_rule:
+            cum_rule = conn.execute(
+                "SELECT * FROM rules WHERE rule_type='cumulative' AND enabled=1 "
+                "AND code='GLOBAL' ORDER BY id LIMIT 1").fetchone()
+        item['baseline_nav'] = None
+        item['baseline_date'] = None
+        item['cumulative_change'] = None
+        item['cumulative_change_est'] = None
+        item['cum_threshold'] = cum_rule['threshold'] if cum_rule else None
+        if cum_rule:
+            st = conn.execute(
+                'SELECT * FROM cumulative_state WHERE rule_id=? AND code=?',
+                (cum_rule['id'], f['code'])).fetchone()
+            if st and st['baseline_nav']:
+                item['baseline_nav'] = st['baseline_nav']
+                item['baseline_date'] = st['baseline_date']
+                if item.get('unit_nav'):
+                    item['cumulative_change'] = round(
+                        (item['unit_nav'] - st['baseline_nav']) / st['baseline_nav'] * 100, 2)
+                if item.get('estimated_nav'):
+                    item['cumulative_change_est'] = round(
+                        (item['estimated_nav'] - st['baseline_nav']) / st['baseline_nav'] * 100, 2)
+        out.append(item)
+    conn.close()
+    return jsonify(out)
+
+
+@app.route('/api/funds', methods=['POST'])
+def api_add_fund():
+    data = request.get_json(silent=True) or {}
+    code = str(data.get('code', '')).strip()
+    if not code:
+        return jsonify({'error': '请输入基金代码'}), 400
+    try:
+        d = fund_data.fetch_fund(code)
+    except Exception as e:
+        return jsonify({'error': '获取失败：' + str(e)}), 400
+    conn = database.get_conn()
+    if conn.execute('SELECT id FROM funds WHERE code=?', (d['code'],)).fetchone():
+        conn.close()
+        return jsonify({'error': '该基金已在监控列表'}), 400
+    conn.execute('INSERT INTO funds (code, name, enabled, created_at) VALUES (?,?,?,?)',
+                 (d['code'], d['name'], 1, rule_engine.now_str()))
+    # 复用本次抓到的数据入库，避免再次请求触发限流
+    conn.execute(
+        'INSERT INTO nav_history (code, nav_date, unit_nav, acc_nav, actual_change, '
+        'estimated_nav, estimated_change, gztime, fetched_at) VALUES (?,?,?,?,?,?,?,?,?)',
+        (d['code'], d['nav_date'], d['unit_nav'], d['acc_nav'], d['actual_change'],
+         d['estimated_nav'], d['estimated_change'], d['gztime'], rule_engine.now_str()))
+    conn.commit()
+    conn.close()
+    # 后台回填近 30 天历史净值（用于走势图），不阻塞响应
+    def _backfill():
+        try:
+            hist = fund_data.fetch_history(d['code'], 30)
+            if not hist:
+                return
+            c = database.get_conn()
+            have = {r[0] for r in c.execute(
+                'SELECT DISTINCT nav_date FROM nav_history WHERE code=?',
+                (d['code'],)).fetchall()}
+            for h in hist:
+                if h['date'] not in have:
+                    c.execute(
+                        'INSERT INTO nav_history (code, nav_date, unit_nav, acc_nav, '
+                        'actual_change, estimated_nav, estimated_change, gztime, fetched_at) '
+                        'VALUES (?,?,?,?,?,?,?,?,?)',
+                        (d['code'], h['date'], h['nav'], h['acc_nav'], h['change'],
+                         None, None, None, rule_engine.now_str()))
+            c.commit()
+            c.close()
+        except Exception:
+            pass
+    threading.Thread(target=_backfill, daemon=True).start()
+    return jsonify({'ok': True, 'code': d['code'], 'name': d['name']})
+
+
+@app.route('/api/funds/<int:fid>', methods=['PUT'])
+def api_edit_fund(fid):
+    data = request.get_json(silent=True) or {}
+    sets, args = [], []
+    if 'name' in data:
+        sets.append('name=?')
+        args.append(data['name'])
+    if 'enabled' in data:
+        sets.append('enabled=?')
+        args.append(1 if data['enabled'] else 0)
+    if sets:
+        conn = database.get_conn()
+        args.append(fid)
+        conn.execute('UPDATE funds SET %s WHERE id=?' % ', '.join(sets), args)
+        conn.commit()
+        conn.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/funds/<int:fid>', methods=['DELETE'])
+def api_del_fund(fid):
+    conn = database.get_conn()
+    conn.execute('DELETE FROM funds WHERE id=?', (fid,))
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
+
+# ------------------------- 规则 CRUD -------------------------
+
+@app.route('/api/rules')
+def api_rules():
+    conn = database.get_conn()
+    rules = conn.execute('SELECT * FROM rules ORDER BY id').fetchall()
+    out = []
+    for r in rules:
+        item = dict(r)
+        if r['code'] == 'GLOBAL':
+            item['scope'] = 'global'
+            item['scope_name'] = '所有基金'
+        else:
+            item['scope'] = 'fund'
+            fund = conn.execute('SELECT name FROM funds WHERE code=?', (r['code'],)).fetchone()
+            item['scope_name'] = fund['name'] if fund else r['code']
+        out.append(item)
+    conn.close()
+    return jsonify(out)
+
+
+@app.route('/api/rules', methods=['POST'])
+def api_add_rule():
+    data = request.get_json(silent=True) or {}
+    code = data.get('code') or 'GLOBAL'
+    rule_type = data.get('rule_type')
+    direction = data.get('direction', 'both')
+    threshold = float(data.get('threshold', 0))
+    enabled = 1 if data.get('enabled', True) else 0
+    if rule_type not in ('daily', 'cumulative'):
+        return jsonify({'error': '无效规则类型'}), 400
+    if threshold <= 0:
+        return jsonify({'error': '阈值必须大于 0'}), 400
+    conn = database.get_conn()
+    exist = conn.execute(
+        'SELECT id FROM rules WHERE code=? AND rule_type=? AND direction=?',
+        (code, rule_type, direction)).fetchone()
+    if exist:
+        conn.execute('UPDATE rules SET threshold=?, enabled=? WHERE id=?',
+                     (threshold, enabled, exist['id']))
+        rid = exist['id']
+    else:
+        cur = conn.execute(
+            'INSERT INTO rules (code, rule_type, direction, threshold, enabled, created_at) '
+            'VALUES (?,?,?,?,?,?)',
+            (code, rule_type, direction, threshold, enabled, rule_engine.now_str()))
+        rid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'id': rid})
+
+
+@app.route('/api/rules/<int:rid>', methods=['DELETE'])
+def api_del_rule(rid):
+    conn = database.get_conn()
+    conn.execute('DELETE FROM rules WHERE id=?', (rid,))
+    conn.execute('DELETE FROM cumulative_state WHERE rule_id=?', (rid,))
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
+
+# ------------------------- 监控记录 -------------------------
+
+@app.route('/api/alerts')
+def api_alerts():
+    code = request.args.get('code', '')
+    limit = int(request.args.get('limit', 200))
+    conn = database.get_conn()
+    if code:
+        rows = conn.execute(
+            'SELECT * FROM alert_log WHERE code=? ORDER BY id DESC LIMIT ?',
+            (code, limit)).fetchall()
+    else:
+        rows = conn.execute(
+            'SELECT * FROM alert_log ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+# ------------------------- 历史净值（走势图数据） -------------------------
+
+@app.route('/api/history')
+def api_history():
+    code = request.args.get('code', '').strip()
+    days = min(max(int(request.args.get('days', 30)), 7), 120)
+    if not code:
+        return jsonify({'error': '缺少 code 参数'}), 400
+    conn = database.get_conn()
+    # 关联子查询取每个 nav_date 最新一条（SQLite 与 PostgreSQL 均兼容，GROUP BY 写法在 PG 不合法）
+    hist_sql = (
+        'SELECT h.nav_date AS date, h.unit_nav AS nav, h.actual_change AS change '
+        'FROM nav_history h WHERE h.code=? AND h.unit_nav IS NOT NULL '
+        'AND h.id = (SELECT MAX(h2.id) FROM nav_history h2 '
+        '            WHERE h2.code=h.code AND h2.nav_date=h.nav_date) '
+        'ORDER BY h.nav_date DESC LIMIT ?')
+    rows = conn.execute(hist_sql, (code, days)).fetchall()
+    have = {r['date'] for r in rows}
+    if len(have) < days:
+        # 本地数据不足，从接口补抓（nav_history 无唯一约束，仅插入缺失日期）
+        hist = fund_data.fetch_history(code, days)
+        for h in hist:
+            if h['date'] not in have:
+                conn.execute(
+                    'INSERT INTO nav_history (code, nav_date, unit_nav, acc_nav, '
+                    'actual_change, estimated_nav, estimated_change, gztime, fetched_at) '
+                    'VALUES (?,?,?,?,?,?,?,?,?)',
+                    (code, h['date'], h['nav'], h['acc_nav'], h['change'],
+                     None, None, None, rule_engine.now_str()))
+        conn.commit()
+        rows = conn.execute(hist_sql, (code, days)).fetchall()
+    conn.close()
+    out = [dict(r) for r in rows]
+    out.reverse()  # 升序返回
+    return jsonify(out)
+
+
+# ------------------------- 概览统计 -------------------------
+
+@app.route('/api/summary')
+def api_summary():
+    today = datetime.date.today().strftime('%Y-%m-%d')
+    conn = database.get_conn()
+    funds = conn.execute('SELECT * FROM funds WHERE enabled=1').fetchall()
+    up = down = flat = 0
+    for f in funds:
+        last = conn.execute(
+            'SELECT estimated_change, actual_change FROM nav_history '
+            'WHERE code=? AND (estimated_change IS NOT NULL OR actual_change IS NOT NULL) '
+            'ORDER BY id DESC LIMIT 1', (f['code'],)).fetchone()
+        chg = None
+        if last:
+            chg = last['estimated_change'] if last['estimated_change'] is not None \
+                else last['actual_change']
+        if chg is None:
+            continue
+        if chg > 0:
+            up += 1
+        elif chg < 0:
+            down += 1
+        else:
+            flat += 1
+    today_alerts = conn.execute(
+        "SELECT COUNT(*) AS c FROM alert_log WHERE trigger_time LIKE ?", (today + '%',)
+    ).fetchone()['c']
+    latest = conn.execute(
+        'SELECT fetched_at FROM nav_history ORDER BY id DESC LIMIT 1').fetchone()
+    conn.close()
+    return jsonify({
+        'fund_count': len(funds),
+        'up_count': up, 'down_count': down, 'flat_count': flat,
+        'today_alerts': today_alerts,
+        'last_scan': latest['fetched_at'] if latest else None,
+    })
+
+
+# ------------------------- 配置 -------------------------
+
+@app.route('/api/config', methods=['GET', 'POST'])
+def api_config():
+    if request.method == 'GET':
+        return jsonify(load_config())
+    data = request.get_json(silent=True) or {}
+    cfg = load_config()
+    for k in ('serverchan_sendkey', 'pushplus_token',
+              'scan_interval_seconds', 'off_hours_interval_seconds'):
+        if k in data:
+            cfg[k] = data[k]
+    if 'email' in data:
+        cfg['email'] = data['email']
+    save_config(cfg)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/refresh', methods=['POST'])
+def api_refresh():
+    fetched, alerts = scan_once()
+    return jsonify({'ok': True, 'fetched': fetched, 'alerts': alerts})
+
+
+@app.route('/api/test_notify', methods=['POST'])
+def api_test_notify():
+    result = notifier.send_alert(
+        load_config(), '基金涨跌监控 · 测试消息',
+        '这是一条测试提醒，收到说明提醒渠道配置正确。')
+    return jsonify(result)
+
+
+_scheduler_started = False
+_scheduler_lock = threading.Lock()
+
+
+def start_scheduler():
+    """启动后台调度线程（python app.py 与 gunicorn 两种方式都只启动一次）"""
+    global _scheduler_started
+    with _scheduler_lock:
+        if _scheduler_started:
+            return
+        _scheduler_started = True
+        threading.Thread(target=scheduler_loop, daemon=True).start()
+
+
+# 模块级初始化：gunicorn 导入 app 时即建表 + 启动调度线程
+database.init_db()
+start_scheduler()
+
+
+def main():
+    app.run(host='127.0.0.1', port=5000, debug=False)
+
+
+if __name__ == '__main__':
+    main()
