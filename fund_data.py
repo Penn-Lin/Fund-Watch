@@ -19,18 +19,18 @@ import requests
 
 FUND_INFO_URL = 'https://fundmobapi.eastmoney.com/FundMNewApi/FundMNFInfo'
 HISTORY_URL = 'https://fundmobapi.eastmoney.com/FundMNewApi/FundMNHisNetList'
-INDEX_URL = 'https://push2.eastmoney.com/api/qt/ulist.np/get'
+INDEX_URL = 'https://qt.gtimg.cn/q='
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
-# 首页指数版块（secid 前缀：1=沪 0=深 100=港 105=纳斯达克 106=纽交所）
+# 首页指数版块（腾讯行情 secid：sh/sz=沪/深，hk=港，us=美）
 INDEX_LIST = [
-    ('1.000001', '上证指数'),
-    ('0.399001', '深证成指'),
-    ('0.399006', '创业板指'),
-    ('1.000300', '沪深300'),
-    ('1.000688', '科创50'),
-    ('100.HSI', '恒生指数'),
-    ('105.NDX', '纳斯达克100'),
+    ('sh000001', '上证指数'),
+    ('sz399001', '深证成指'),
+    ('sz399006', '创业板指'),
+    ('sh000300', '沪深300'),
+    ('sh000688', '科创50'),
+    ('hkHSI', '恒生指数'),
+    ('usNDX', '纳斯达克100'),
 ]
 
 _index_cache = {'ts': 0.0, 'data': []}
@@ -145,8 +145,10 @@ def fetch_history(code, days=30, retries=2):
 
 
 def fetch_indices(max_age=60.0):
-    """批量抓取指数实时行情（push2 接口），内存缓存 max_age 秒
+    """抓取指数实时行情（腾讯 qt.gtimg.cn 接口，腾讯全球 CDN 海外可达性好）
 
+    腾讯返回格式 v_xxx="字段~分隔..."；关键字段位（A 股/港/美一致）：
+      [1]名称 [2]代码 [3]当前价 [4]昨收 [5]今开 [31]涨跌额 [32]涨跌幅% [33]最高 [34]最低
     返回：[{'secid','code','name','price','change_pct','change_amt',
             'open','pre_close','high','low'}, ...]
     """
@@ -154,30 +156,36 @@ def fetch_indices(max_age=60.0):
     if _index_cache['data'] and now - _index_cache['ts'] < max_age:
         return _index_cache['data']
     try:
-        params = {
-            'fltt': 2, 'invt': 2,
-            'secids': ','.join(s for s, _ in INDEX_LIST),
-            'fields': 'f2,f3,f4,f12,f13,f14,f15,f16,f17,f18',
-        }
-        resp = requests.get(INDEX_URL, params=params, headers=HEADERS, timeout=10)
-        data = resp.json()
+        codes = ','.join(s for s, _ in INDEX_LIST)
+        resp = requests.get(INDEX_URL + codes, headers=HEADERS, timeout=10)
+        resp.encoding = 'gbk'  # 腾讯行情接口用 GBK 编码
         out = []
         by_name = dict(INDEX_LIST)
-        for x in ((data.get('data') or {}).get('diff') or []):
-            secid = '%s.%s' % (x.get('f13'), x.get('f12'))
-            name = by_name.get(secid) or x.get('f14') or secid
-            price = _f(x.get('f2'))
+        for line in resp.text.split(';'):
+            line = line.strip()
+            if not line or '=' not in line:
+                continue
+            key, val = line.split('=', 1)
+            key = key.replace('v_', '').strip()
+            val = val.strip().strip('"')
+            if not val:
+                continue
+            parts = val.split('~')
+            if len(parts) < 35:
+                continue
+            name = by_name.get(key) or parts[1] or key
+            price = _f(parts[3])
             if price is None:
                 continue
             out.append({
-                'secid': secid, 'code': x.get('f12'), 'name': name,
+                'secid': key, 'code': parts[2], 'name': name,
                 'price': price,
-                'change_pct': _f(x.get('f3')),
-                'change_amt': _f(x.get('f4')),
-                'open': _f(x.get('f17')),
-                'pre_close': _f(x.get('f18')),
-                'high': _f(x.get('f15')),
-                'low': _f(x.get('f16')),
+                'change_pct': _f(parts[32]),
+                'change_amt': _f(parts[31]),
+                'open': _f(parts[5]),
+                'pre_close': _f(parts[4]),
+                'high': _f(parts[33]),
+                'low': _f(parts[34]),
             })
         if out:
             _index_cache.update(ts=now, data=out)
