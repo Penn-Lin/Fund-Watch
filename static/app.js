@@ -208,17 +208,9 @@ function renderFunds(funds) {
           <div class="d-row"><span class="dk">节点基准</span><span class="dv">${f.baseline_nav ? num(f.baseline_nav, 4) + '（' + (f.baseline_date || '') + '）' : '待初始化'}</span></div>
           <div class="d-row"><span class="dk">节点步长</span><span class="dv">${f.cum_threshold ? f.cum_threshold + '%' : '未设置'}</span></div>
         </div>
-        <div class="baseline-reset">
-          <div class="bl-title">手动设置基准净值</div>
-          <p class="hint">设定一个净值作为累计起点（如阶段高点）。若当前已穿越节点阈值，会立即触发提醒并从当前净值重新累计下一段——实现"每跌4%定投"。</p>
-          <div class="bl-input-row">
-            <input type="number" step="0.0001" min="0.0001" placeholder="基准净值" data-bl-nav value="${f.unit_nav != null ? f.unit_nav : ''}">
-            <input type="date" data-bl-date>
-          </div>
-          <button class="btn-primary bl-btn" data-act="reset-bl" data-code="${f.code}">设置并评估</button>
-        </div>
         <div class="fund-ops">
           <button data-act="toggle" data-id="${f.id}" data-on="${on ? 1 : 0}">${on ? '暂停监控' : '恢复监控'}</button>
+          <button data-act="open-bl" data-code="${f.code}" data-name="${esc(f.name || '')}" data-nav="${f.unit_nav ?? ''}">设置基准</button>
           <button class="warn" data-act="del" data-id="${f.id}">删除</button>
         </div>
       </div>
@@ -245,33 +237,14 @@ $('#fund-list').addEventListener('click', async (e) => {
           body: JSON.stringify({ enabled: btn.dataset.on !== '1' }),
         });
         toast('已更新');
-      } else if (btn.dataset.act === 'reset-bl') {
-        const code = btn.dataset.code;
-        const card = btn.closest('.fund-card');
-        const navInput = card.querySelector('[data-bl-nav]');
-        const dateInput = card.querySelector('[data-bl-date]');
-        const nav = parseFloat(navInput.value);
-        const date = dateInput.value || new Date().toISOString().slice(0, 10);
-        if (!nav || nav <= 0) { toast('请输入有效的基准净值'); return; }
-        btn.disabled = true; btn.textContent = '设置中…';
-        const r = await api('/api/baseline', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code, baseline_nav: nav, baseline_date: date }),
-        });
-        if (r.triggered > 0) {
-          toast('基准已设置，当前已穿越阈值——已触发提醒并重置为当前净值');
-        } else {
-          toast('基准已设置为 ' + nav.toFixed(4) + '，从该点开始累计');
-        }
+      } else if (btn.dataset.act === 'open-bl') {
+        // 打开设置基准弹窗，预填基金信息
+        openBlSheet(btn.dataset.code, btn.dataset.name, btn.dataset.nav);
+        return;  // 不触发 loadFunds 刷新
       }
-      // 统一刷新（del/toggle/reset-bl 成功后都刷新列表）
-      if (btn.dataset.act === 'reset-bl') { delete chartCache[btn.dataset.code]; }
+      // 统一刷新（del/toggle 成功后刷新列表）
       loadFunds(); loadSummary();
     } catch (err) { toast(err.message); }
-    finally {
-      const blBtn = e.target.closest('[data-act="reset-bl"]');
-      if (blBtn) { blBtn.disabled = false; blBtn.textContent = '设置并评估'; }
-    }
     return;
   }
 
@@ -355,7 +328,26 @@ function sparkline(hist, baseline) {
   </svg>`;
 }
 
-/* ---------------- 添加基金 ---------------- */
+/* ---------------- 添加基金（弹窗） ---------------- */
+function openSheet(sheetId) {
+  $('#' + sheetId + '-mask').classList.add('show');
+  $('#' + sheetId).classList.add('show');
+}
+function closeSheet(sheetId) {
+  $('#' + sheetId + '-mask').classList.remove('show');
+  $('#' + sheetId).classList.remove('show');
+}
+$('#btn-add-open').addEventListener('click', () => {
+  $('#add-code').value = '';
+  openSheet('add');
+  setTimeout(() => $('#add-code').focus(), 320);
+});
+$$('[data-sheet]').forEach((btn) => {
+  btn.addEventListener('click', () => closeSheet(btn.dataset.sheet));
+});
+$('#add-mask').addEventListener('click', () => closeSheet('add'));
+$('#bl-mask').addEventListener('click', () => closeSheet('bl'));
+
 $('#btn-add').addEventListener('click', async () => {
   const code = $('#add-code').value.trim();
   if (!code) { toast('请输入基金代码'); return; }
@@ -368,14 +360,51 @@ $('#btn-add').addEventListener('click', async () => {
       body: JSON.stringify({ code }),
     });
     toast(`已添加 ${r.name}（${r.code}），历史走势稍后自动补全`);
-    $('#add-code').value = '';
     delete chartCache[code];
+    closeSheet('add');
     loadFunds(); loadSummary();
   } catch (e) { toast(e.message); }
   finally { btn.disabled = false; btn.textContent = '添加'; }
 });
 $('#add-code').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') $('#btn-add').click();
+});
+
+/* ---------------- 设置基准（弹窗） ---------------- */
+function openBlSheet(code, name, curNav) {
+  $('#bl-fund-name').textContent = name + '（' + code + '）';
+  $('#bl-cur-nav').textContent = curNav ? Number(curNav).toFixed(4) : '—';
+  $('#bl-nav').value = curNav || '';
+  $('#bl-nav').dataset.code = code;
+  openSheet('bl');
+  setTimeout(() => $('#bl-nav').focus(), 320);
+}
+
+$('#btn-bl-confirm').addEventListener('click', async () => {
+  const code = $('#bl-nav').dataset.code;
+  const nav = parseFloat($('#bl-nav').value);
+  if (!code) { toast('基金信息丢失，请重新打开'); return; }
+  if (!nav || nav <= 0) { toast('请输入有效的基准净值'); return; }
+  const btn = $('#btn-bl-confirm');
+  btn.disabled = true; btn.textContent = '设置中…';
+  try {
+    const r = await api('/api/baseline', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, baseline_nav: nav }),
+    });
+    if (r.triggered > 0) {
+      toast('当前已穿越阈值——已触发提醒并重置为当前净值');
+    } else {
+      toast('基准已设为 ' + nav.toFixed(4) + '，从该点开始累计');
+    }
+    delete chartCache[code];
+    closeSheet('bl');
+    loadFunds(); loadSummary();
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; btn.textContent = '设置并评估'; }
+});
+$('#bl-nav').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#btn-bl-confirm').click();
 });
 
 /* ---------------- 刷新 ---------------- */

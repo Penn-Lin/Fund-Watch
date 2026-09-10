@@ -39,10 +39,10 @@
         <div class="strip-title">主要指数</div>
         <div id="index-strip" class="index-strip"></div>
       </div>
-      <div class="add-card">
-        <input id="add-code" type="tel" maxlength="6" placeholder="输入 6 位基金代码" inputmode="numeric">
-        <button id="btn-add" class="btn-primary">添加</button>
-      </div>
+      <button id="btn-add-open" class="add-open-btn">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        <span>添加基金</span>
+      </button>
       <div id="fund-list" class="fund-list"></div>
       <p class="foot-note">点击基金卡片查看走势详情 · 数据来自东方财富</p>
     </section>
@@ -218,6 +218,43 @@
   <div id="ix-sheet" class="ix-sheet">
     <div class="sheet-handle"></div>
     <div id="ix-detail"></div>
+  </div>
+
+  <!-- ===== 添加基金抽屉 ===== -->
+  <div id="add-mask" class="sheet-mask"></div>
+  <div id="add-sheet" class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-head">
+      <h3>添加基金</h3>
+      <button class="sheet-close" data-sheet="add">×</button>
+    </div>
+    <div class="sheet-body">
+      <input id="add-code" type="tel" maxlength="6" placeholder="输入 6 位基金代码" inputmode="numeric">
+      <button id="btn-add" class="btn-primary btn-block">添加</button>
+    </div>
+  </div>
+
+  <!-- ===== 设置基准净值抽屉 ===== -->
+  <div id="bl-mask" class="sheet-mask"></div>
+  <div id="bl-sheet" class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-head">
+      <h3>设置基准净值</h3>
+      <button class="sheet-close" data-sheet="bl">×</button>
+    </div>
+    <div class="sheet-body">
+      <div class="bl-fund-name" id="bl-fund-name"></div>
+      <p class="hint">设定一个净值作为累计起点（如阶段高点）。若当前已穿越节点阈值，会立即触发提醒并从当前净值重新累计下一段——实现"每跌4%定投"。</p>
+      <div class="bl-cur">
+        <span>当前净值</span>
+        <span id="bl-cur-nav" class="bl-cur-val">—</span>
+      </div>
+      <div class="bl-input-wrap">
+        <label>基准净值</label>
+        <input id="bl-nav" type="number" step="0.0001" min="0.0001" placeholder="输入基准净值">
+      </div>
+      <button id="btn-bl-confirm" class="btn-primary btn-block">设置并评估</button>
+    </div>
   </div>
 
   <div id="toast"></div>

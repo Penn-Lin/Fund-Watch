@@ -84,17 +84,15 @@ main { padding: 14px 14px 96px; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 /* ===== 添加基金 ===== */
-.add-card {
-  display: flex; gap: 10px; margin-bottom: 14px;
-  background: var(--card); border-radius: 14px; padding: 10px;
-  box-shadow: var(--shadow);
+.add-open-btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; margin-bottom: 14px;
+  padding: 13px; border: 2px dashed #d4d6db; border-radius: 14px;
+  background: var(--card); color: var(--text-2);
+  font-size: 15px; font-weight: 600; cursor: pointer;
+  box-shadow: var(--shadow); transition: all .15s;
 }
-.add-card input {
-  flex: 1; border: 1.5px solid var(--border); border-radius: 10px;
-  padding: 10px 14px; font-size: 15px; outline: none; background: #fafbfc;
-  font-variant-numeric: tabular-nums;
-}
-.add-card input:focus { border-color: var(--primary); background: #fff; }
+.add-open-btn:active { border-color: var(--primary); color: var(--primary); background: #fff7f6; }
 
 .btn-primary {
   border: none; border-radius: 10px; background: linear-gradient(135deg, #e0342f, #ff6a5c);
@@ -182,34 +180,15 @@ main { padding: 14px 14px 96px; }
 .d-row .dv.down { color: var(--green); }
 
 .fund-ops {
-  display: flex; gap: 10px; padding: 10px 16px 14px;
+  display: flex; gap: 8px; padding: 10px 16px 14px;
 }
 .fund-ops button {
   flex: 1; border: 1.5px solid var(--border); background: #fff;
   border-radius: 10px; padding: 9px 0; font-size: 13px;
   color: var(--text-2); cursor: pointer;
 }
+.fund-ops button[data-act="open-bl"] { color: var(--primary); border-color: #f6cfce; background: #fff7f6; font-weight: 600; }
 .fund-ops button.warn { color: var(--red); border-color: #f6cfce; background: #fff7f6; }
-
-/* 手动设置基准净值区 */
-.baseline-reset {
-  margin: 6px 16px 4px; padding: 12px;
-  background: #f8f9fb; border-radius: 12px;
-}
-.bl-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
-.baseline-reset .hint { font-size: 11px; color: var(--text-3); line-height: 1.5; margin-bottom: 8px; }
-.bl-input-row { display: flex; gap: 8px; margin-bottom: 8px; }
-.bl-input-row input {
-  flex: 1; border: 1.5px solid var(--border); border-radius: 8px;
-  padding: 8px 10px; font-size: 13px; background: #fff; outline: none;
-  font-variant-numeric: tabular-nums;
-}
-.bl-input-row input:focus { border-color: var(--primary); }
-.bl-btn {
-  width: 100%; padding: 9px; font-size: 13px; border-radius: 8px;
-  border: none; cursor: pointer;
-}
-.bl-btn:disabled { opacity: .6; cursor: not-allowed; }
 
 /* ===== 通用卡片 ===== */
 .card {
@@ -428,3 +407,57 @@ main { padding: 14px 14px 96px; }
 .ix-sheet-grid .cell .v { font-size: 15px; }
 .ix-sheet-grid .cell .v.up { color: var(--red); }
 .ix-sheet-grid .cell .v.down { color: var(--green); }
+
+/* ===== 通用底部抽屉（添加基金 / 设置基准） ===== */
+.sheet-mask {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(20,22,26,.5);
+  opacity: 0; pointer-events: none; transition: opacity .25s;
+}
+.sheet-mask.show { opacity: 1; pointer-events: auto; }
+
+.sheet {
+  position: fixed; left: 50%; bottom: 0; transform: translateX(-50%) translateY(100%);
+  width: 100%; max-width: 480px; z-index: 91;
+  background: #fff; border-radius: 20px 20px 0 0;
+  padding: 8px 18px calc(20px + env(safe-area-inset-bottom));
+  box-shadow: 0 -6px 30px rgba(0,0,0,.18);
+  transition: transform .3s cubic-bezier(.32,.72,.32,1);
+  max-height: 80vh; overflow-y: auto;
+}
+.sheet.show { transform: translateX(-50%) translateY(0); }
+
+.sheet-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding-bottom: 12px; border-bottom: 1px solid var(--border);
+}
+.sheet-head h3 { font-size: 16px; font-weight: 700; }
+.sheet-close {
+  width: 30px; height: 30px; border: none; border-radius: 50%;
+  background: #f4f5f7; color: var(--text-2);
+  font-size: 20px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.sheet-close:active { background: #e8eaee; }
+
+.sheet-body { padding-top: 14px; }
+.sheet-body input {
+  width: 100%; border: 1.5px solid var(--border); border-radius: 10px;
+  padding: 11px 14px; font-size: 15px; outline: none; background: #fafbfc;
+  font-variant-numeric: tabular-nums; margin-bottom: 12px;
+}
+.sheet-body input:focus { border-color: var(--primary); background: #fff; }
+
+/* 设置基准抽屉内部 */
+.bl-fund-name { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+.bl-cur {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 14px; background: #f8f9fb; border-radius: 10px;
+  font-size: 13px; color: var(--text-2); margin-bottom: 12px;
+}
+.bl-cur-val { font-size: 15px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.bl-input-wrap { margin-bottom: 14px; }
+.bl-input-wrap label {
+  display: block; font-size: 13px; color: var(--text-2); margin-bottom: 6px;
+}
+.bl-input-wrap input { margin-bottom: 0; }
