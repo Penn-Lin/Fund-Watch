@@ -38,7 +38,7 @@ const DIR_TEXT = { up: '上涨', down: '下跌', both: '涨跌双向' };
 const RULE_TEXT = { daily: '当日涨跌', cumulative: '累计节点' };
 const KIND_TEXT = {
   daily: '当日阈值', cum_estimate: '累计估值预警', cum_confirm: '累计净值确认',
-  daily_summary: '收盘汇总',
+  daily_summary: '收盘汇总', index_threshold: '指数阈值', index_summary: '指数汇总',
 };
 
 /* ---------------- Tab 切换（底部导航） ---------------- */
@@ -535,6 +535,12 @@ async function loadConfig() {
   const ds = cfg.daily_summary || {};
   $('#cf-sum-time').value = ds.time || '20:00';
   $('#cf-sum-on').checked = !!ds.enabled;
+  const ixa = cfg.index_alert || {};
+  $('#cf-ixa-th').value = ixa.threshold || 3;
+  $('#cf-ixa-on').checked = !!ixa.enabled;
+  const ixs = cfg.index_summary || {};
+  $('#cf-ixs-time').value = ixs.time || '20:00';
+  $('#cf-ixs-on').checked = !!ixs.enabled;
 }
 
 $('#btn-save-cfg').addEventListener('click', async () => {
@@ -547,6 +553,14 @@ $('#btn-save-cfg').addEventListener('click', async () => {
       daily_summary: {
         enabled: $('#cf-sum-on').checked,
         time: $('#cf-sum-time').value || '20:00',
+      },
+      index_alert: {
+        enabled: $('#cf-ixa-on').checked,
+        threshold: parseFloat($('#cf-ixa-th').value) || 3,
+      },
+      index_summary: {
+        enabled: $('#cf-ixs-on').checked,
+        time: $('#cf-ixs-time').value || '20:00',
       },
       email: {
         smtp_host: $('#cf-host').value.trim(),

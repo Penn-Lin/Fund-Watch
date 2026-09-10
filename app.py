@@ -180,6 +180,122 @@ def maybe_send_summary():
     return True
 
 
+# ------------------------- 指数推送 -------------------------
+
+def _build_index_summary_message():
+    """生成指数收盘汇总消息，返回 (msg, 条数)"""
+    indices = fund_data.fetch_indices(max_age=120)
+    if not indices:
+        return None, 0
+    lines = []
+    for ix in indices:
+        chg = ix.get('change_pct')
+        if chg is None:
+            continue
+        sign = '+' if chg > 0 else ''
+        price = ix['price']
+        price_str = '%.2f' % price if price else '—'
+        lines.append('· %s %s%.2f%%，%s' % (
+            ix['name'], sign, chg, price_str))
+    if not lines:
+        return None, 0
+    weekday = '周' + '一二三四五六日'[datetime.date.today().weekday()]
+    msg = '📈 指数收盘汇总 %s %s\n%s' % (
+        rule_engine.today_str(), weekday, '\n'.join(lines))
+    return msg, len(lines)
+
+
+def maybe_send_index_summary():
+    """到点推送指数汇总（每交易日一次，alert_log 去重）"""
+    cfg = load_config()
+    ds = cfg.get('index_summary') or {}
+    if not ds.get('enabled'):
+        return False
+    hhmm = str(ds.get('time') or '20:00')
+    now = datetime.datetime.now()
+    if not rule_engine.is_trading_day(now):
+        return False
+    try:
+        h, m = (int(x) for x in hhmm.split(':'))
+    except Exception:
+        return False
+    if (now.hour, now.minute) < (h, m):
+        return False
+    today = rule_engine.today_str()
+    conn = database.get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM alert_log WHERE kind='index_summary' "
+        "AND trigger_time LIKE ?", (today + '%',)).fetchone()
+    conn.close()
+    if row['c'] > 0:
+        return False
+
+    msg, _ = _build_index_summary_message()
+    if msg is None:
+        return False
+    result = notifier.send_alert(cfg, '基金监控 · 指数收盘汇总', msg)
+    conn = database.get_conn()
+    conn.execute(
+        'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
+        'current_change, trigger_time, message, notify_status) '
+        "VALUES ('IX_SUMMARY', '指数汇总', 'index', NULL, 'index_summary', "
+        'NULL, ?, ?, ?)',
+        (rule_engine.now_str(), msg,
+         'sent' if result['ok'] else 'failed'))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def maybe_eval_indices():
+    """指数涨跌幅超阈值即时推送（每指数每方向每日一次去重）"""
+    cfg = load_config()
+    ia = cfg.get('index_alert') or {}
+    if not ia.get('enabled'):
+        return 0
+    threshold = float(ia.get('threshold') or 3)
+    if threshold <= 0:
+        return 0
+    indices = fund_data.fetch_indices(max_age=60)
+    if not indices:
+        return 0
+    today = rule_engine.today_str()
+    sent = 0
+    for ix in indices:
+        chg = ix.get('change_pct')
+        if chg is None:
+            continue
+        direction = 'up' if chg >= threshold else (
+            'down' if chg <= -threshold else None)
+        if not direction:
+            continue
+        code = 'IX_' + (ix.get('secid') or ix.get('code') or ix['name'])
+        conn = database.get_conn()
+        already = conn.execute(
+            "SELECT COUNT(*) AS c FROM alert_log WHERE code=? AND kind='index_threshold' "
+            "AND direction=? AND trigger_time LIKE ?",
+            (code, direction, today + '%')).fetchone()['c']
+        if already:
+            conn.close()
+            continue
+        sign = '+' if chg > 0 else ''
+        up_down = '上涨' if direction == 'up' else '下跌'
+        msg = '【%s】指数当日%s %s%.2f%%，达到阈值 %.2f%%' % (
+            ix['name'], up_down, sign, chg, threshold)
+        result = notifier.send_alert(cfg, '基金监控 · 指数提醒', msg)
+        conn.execute(
+            'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
+            'current_change, trigger_time, message, notify_status) '
+            'VALUES (?,?,?,?,?,?,?,?,?)',
+            (code, ix['name'], 'index', direction, 'index_threshold',
+             chg, rule_engine.now_str(), msg,
+             'sent' if result['ok'] else 'failed'))
+        conn.commit()
+        conn.close()
+        sent += 1
+    return sent
+
+
 def scheduler_loop():
     while True:
         try:
@@ -190,6 +306,14 @@ def scheduler_loop():
             maybe_send_summary()
         except Exception as e:
             print('summary error:', e)
+        try:
+            maybe_eval_indices()
+        except Exception as e:
+            print('index alert error:', e)
+        try:
+            maybe_send_index_summary()
+        except Exception as e:
+            print('index summary error:', e)
         try:
             time.sleep(_interval())
         except Exception:
@@ -522,6 +646,18 @@ def api_config():
         cfg['daily_summary'] = {
             'enabled': bool(ds.get('enabled')),
             'time': str(ds.get('time') or '20:00'),
+        }
+    if 'index_alert' in data:
+        ia = data['index_alert'] or {}
+        cfg['index_alert'] = {
+            'enabled': bool(ia.get('enabled')),
+            'threshold': float(ia.get('threshold') or 3),
+        }
+    if 'index_summary' in data:
+        idxs = data['index_summary'] or {}
+        cfg['index_summary'] = {
+            'enabled': bool(idxs.get('enabled')),
+            'time': str(idxs.get('time') or '20:00'),
         }
     if 'email' in data:
         cfg['email'] = data['email']

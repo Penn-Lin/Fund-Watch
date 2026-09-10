@@ -154,6 +154,26 @@
       </div>
 
       <div class="card">
+        <div class="card-head"><h2>指数涨跌提醒</h2></div>
+        <p class="hint">任一主要指数当日涨跌幅达到设定阈值时即时推送（每指数每方向每日一次）</p>
+        <div class="form-row">
+          <span class="form-label">阈值 ±%</span>
+          <input id="cf-ixa-th" type="number" step="0.5" min="0.5" value="3">
+          <label class="switch"><input id="cf-ixa-on" type="checkbox"><i></i></label>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>指数收盘汇总</h2></div>
+        <p class="hint">每个交易日到达设定时间后，推送一条所有指数当日涨跌汇总</p>
+        <div class="form-row">
+          <span class="form-label">推送时间</span>
+          <input id="cf-ixs-time" type="time" value="20:00">
+          <label class="switch"><input id="cf-ixs-on" type="checkbox"><i></i></label>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-head"><h2>扫描频率（秒）</h2></div>
         <div class="form-row">
           <span class="form-label">盘中</span>
