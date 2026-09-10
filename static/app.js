@@ -69,6 +69,64 @@ async function loadSummary() {
   } catch (e) { /* 静默 */ }
 }
 
+/* ---------------- 指数行情 ---------------- */
+let _indices = [];
+
+async function loadIndices() {
+  try {
+    _indices = await api('/api/indices');
+    renderIndices();
+  } catch (e) { /* 静默，保留上次数据 */ }
+}
+
+function renderIndices() {
+  const box = $('#index-strip');
+  if (!_indices.length) {
+    box.innerHTML = '<span class="ix-empty">指数加载中…</span>';
+    return;
+  }
+  box.innerHTML = _indices.map((ix, i) => `
+    <button class="ix-card" data-ix="${i}">
+      <div class="ix-name">${esc(ix.name)}</div>
+      <div class="ix-val">${num(ix.price)}</div>
+      <div class="ix-chg ${cls(ix.change_pct)}">${pct(ix.change_pct)}</div>
+    </button>`).join('');
+}
+
+$('#index-strip').addEventListener('click', (e) => {
+  const card = e.target.closest('.ix-card');
+  if (!card) return;
+  const ix = _indices[+card.dataset.ix];
+  if (!ix) return;
+  const rows = [
+    ['今开', num(ix.open)], ['昨收', num(ix.pre_close)],
+    ['最高', num(ix.high)], ['最低', num(ix.low)],
+    ['涨跌额', (ix.change_amt > 0 ? '+' : '') + num(ix.change_amt)],
+  ];
+  $('#ix-detail').innerHTML = `
+    <div class="ix-sheet-head">
+      <div>
+        <div class="ix-sheet-name">${esc(ix.name)}</div>
+        <div class="ix-sheet-code">${esc(ix.code)}</div>
+      </div>
+      <div class="ix-sheet-num">
+        <div class="big ${cls(ix.change_pct)}">${pct(ix.change_pct)}</div>
+        <div class="sub ${cls(ix.change_pct)}">${num(ix.price)}</div>
+      </div>
+    </div>
+    <div class="ix-sheet-grid">
+      ${rows.map(([k, v]) => `<div class="cell"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}
+    </div>`;
+  $('#ix-mask').classList.add('show');
+  $('#ix-sheet').classList.add('show');
+});
+
+function closeIxSheet() {
+  $('#ix-mask').classList.remove('show');
+  $('#ix-sheet').classList.remove('show');
+}
+$('#ix-mask').addEventListener('click', closeIxSheet);
+
 /* ---------------- 监控列表 ---------------- */
 async function loadFunds() {
   try {
@@ -532,5 +590,7 @@ function esc(s) {
 /* ---------------- 启动 ---------------- */
 loadFunds();
 loadSummary();
+loadIndices();
 setInterval(loadFunds, 60000);
 setInterval(loadSummary, 60000);
+setInterval(loadIndices, 60000);   // 指数 60 秒刷新（后端有 60s 缓存，不会打接口）

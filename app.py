@@ -459,6 +459,15 @@ def api_history():
 
 # ------------------------- 概览统计 -------------------------
 
+@app.route('/api/indices')
+def api_indices():
+    """指数实时行情（60 秒内存缓存，不入库不参与预警）"""
+    try:
+        return jsonify(fund_data.fetch_indices())
+    except Exception:
+        return jsonify([])
+
+
 @app.route('/api/summary')
 def api_summary():
     today = datetime.date.today().strftime('%Y-%m-%d')

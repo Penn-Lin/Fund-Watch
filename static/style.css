@@ -330,3 +330,81 @@ main { padding: 14px 14px 96px; }
 .up { color: var(--red); }
 .down { color: var(--green); }
 .flat { color: var(--text-2); }
+
+/* ===== 指数横滑条 ===== */
+.index-strip-box {
+  background: var(--card); border-radius: 16px; box-shadow: var(--shadow);
+  padding: 12px 14px 10px; margin-bottom: 14px;
+}
+.index-strip-box .strip-title {
+  font-size: 12px; color: var(--text-2); font-weight: 600;
+  margin-bottom: 10px; letter-spacing: .3px;
+}
+.index-strip {
+  display: flex; gap: 10px; overflow-x: auto;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  padding-bottom: 2px;
+}
+.index-strip::-webkit-scrollbar { display: none; }
+
+.ix-card {
+  flex-shrink: 0; width: 88px; border: none; background: #f8f9fb;
+  border-radius: 12px; padding: 9px 8px 8px; cursor: pointer;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  transition: transform .15s, background .15s; text-align: left;
+}
+.ix-card:active { transform: scale(.96); background: #f0f2f5; }
+.ix-name { font-size: 11px; color: var(--text-2); line-height: 1.2; }
+.ix-val {
+  font-size: 15px; font-weight: 700; color: var(--text);
+  font-variant-numeric: tabular-nums; line-height: 1.15;
+}
+.ix-chg { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ix-chg.up { color: var(--red); }
+.ix-chg.down { color: var(--green); }
+.ix-chg.flat { color: var(--text-2); }
+.ix-empty { font-size: 12px; color: var(--text-3); padding: 8px 4px; }
+
+/* ===== 指数详情底部抽屉 ===== */
+.ix-mask {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(20,22,26,.5);
+  opacity: 0; pointer-events: none; transition: opacity .25s;
+}
+.ix-mask.show { opacity: 1; pointer-events: auto; }
+
+.ix-sheet {
+  position: fixed; left: 50%; bottom: 0; transform: translateX(-50%) translateY(100%);
+  width: 100%; max-width: 480px; z-index: 91;
+  background: #fff; border-radius: 20px 20px 0 0;
+  padding: 8px 18px calc(20px + env(safe-area-inset-bottom));
+  box-shadow: 0 -6px 30px rgba(0,0,0,.18);
+  transition: transform .3s cubic-bezier(.32,.72,.32,1);
+  max-height: 80vh; overflow-y: auto;
+}
+.ix-sheet.show { transform: translateX(-50%) translateY(0); }
+
+.sheet-handle {
+  width: 36px; height: 4px; border-radius: 99px; background: #dcdfe4;
+  margin: 0 auto 14px;
+}
+.ix-sheet-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding-bottom: 14px; border-bottom: 1px solid var(--border);
+}
+.ix-sheet-name { font-size: 17px; font-weight: 700; }
+.ix-sheet-code { font-size: 12px; color: var(--text-3); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.ix-sheet-num { text-align: right; }
+.ix-sheet-num .big { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.ix-sheet-num .big.up { color: var(--red); }
+.ix-sheet-num .big.down { color: var(--green); }
+.ix-sheet-num .big.flat { color: var(--text-2); }
+.ix-sheet-num .sub { font-size: 13px; color: var(--text-2); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.ix-sheet-grid {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
+  margin-top: 14px;
+}
+.ix-sheet-grid .cell { padding: 10px 4px; }
+.ix-sheet-grid .cell .v { font-size: 15px; }
+.ix-sheet-grid .cell .v.up { color: var(--red); }
+.ix-sheet-grid .cell .v.down { color: var(--green); }
