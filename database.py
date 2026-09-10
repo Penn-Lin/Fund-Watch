@@ -34,7 +34,11 @@ class PgConn:
 
     def execute(self, sql, args=()):
         s = sql.replace('?', '%s') if '?' in sql else sql
-        if s.lstrip().upper().startswith('INSERT') and 'RETURNING' not in s.upper():
+        # 普通 INSERT 自动追加 RETURNING id 以模拟 lastrowid；
+        # 带 ON CONFLICT 的自定义 UPSERT（如 config 表，无 id 列）不追加
+        if (s.lstrip().upper().startswith('INSERT')
+                and 'RETURNING' not in s.upper()
+                and 'ON CONFLICT' not in s.upper()):
             s += ' RETURNING id'
             self.cur.execute(s, args)
             row = self.cur.fetchone()
@@ -138,7 +142,6 @@ _PG_DDL = [s.replace('INTEGER PRIMARY KEY AUTOINCREMENT',
            .replace(' REAL,', ' DOUBLE PRECISION,')
            .replace(' REAL)', ' DOUBLE PRECISION)')
            .replace(' REAL NOT NULL', ' DOUBLE PRECISION NOT NULL')
-           .replace(' TEXT PRIMARY KEY', 'TEXT PRIMARY KEY')
            for s in _SQLITE_DDL]
 
 

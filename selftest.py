@@ -56,7 +56,9 @@ class FakePgConn(PgConn):
         self.sqls = []
     def execute(self, sql, args=()):
         s = sql.replace('?', '%s') if '?' in sql else sql
-        if s.lstrip().upper().startswith('INSERT') and 'RETURNING' not in s.upper():
+        if (s.lstrip().upper().startswith('INSERT')
+                and 'RETURNING' not in s.upper()
+                and 'ON CONFLICT' not in s.upper()):
             s += ' RETURNING id'
         self.sqls.append(s)
         return self
@@ -81,11 +83,13 @@ fake.execute('DELETE FROM rules WHERE id=?', (1,))
 assert fake.sqls[-1] == 'DELETE FROM rules WHERE id=%s'
 print('[2/3] PgConn SQL 方言转换 OK')
 
-# ---------- 3. PG DDL 语法检查（不应残留 AUTOINCREMENT / 裸 REAL） ----------
+# ---------- 3. PG DDL 语法检查（不应残留 AUTOINCREMENT / 裸 REAL / 粘连词） ----------
+import re
 bad = [d for d in database._PG_DDL
        if 'AUTOINCREMENT' in d or ' REAL,' in d or ' REAL)' in d
-       or ' REAL NOT NULL' in d]
-assert not bad, 'PG DDL 存在 SQLite 残留语法: %s' % bad
+       or ' REAL NOT NULL' in d
+       or re.search(r'\wTEXT|\wDOUBLE|\wINTEGER|\wPRIMARY', d)]
+assert not bad, 'PG DDL 存在 SQLite 残留/词法粘连: %s' % bad
 assert all('GENERATED ALWAYS AS IDENTITY' in d for d in database._PG_DDL if 'id INTEGER' in d)
 print('[3/3] PG DDL 语法 OK')
 
