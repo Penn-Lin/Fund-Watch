@@ -128,6 +128,68 @@ def _eval_cumulative(conn, rule, d, now, tstr):
     return alerts
 
 
+def evaluate_baseline_reset(code):
+    """手动重置基准后立即评估单只基金。
+
+    用最新净值（不限当日）计算累计涨跌，若已穿越阈值则生成 cum_confirm
+    提醒并重置基准为当前净值——实现"每跌4%定投"的核心逻辑：
+    用户设一个高点基准，若当前已跌超4%立即触发定投信号，并从当前
+    净值重新累计下一段4%。
+
+    与 _eval_cumulative 的区别：不依赖 nav_date==today 条件，非交易日/
+    盘前/盘中均可评估，用于手动设置基准后的即时判定。
+    """
+    conn = database.get_conn()
+    now = datetime.datetime.now()
+    tstr = today_str()
+    fund = conn.execute(
+        'SELECT * FROM funds WHERE code=? AND enabled=1', (code,)).fetchone()
+    if not fund:
+        conn.close()
+        return []
+    last = conn.execute(
+        'SELECT * FROM nav_history WHERE code=? ORDER BY id DESC LIMIT 1',
+        (code,)).fetchone()
+    if not last:
+        conn.close()
+        return []
+    cum_rule = _get_rule(conn, code, 'cumulative')
+    if not cum_rule:
+        conn.close()
+        return []
+    state = conn.execute(
+        'SELECT * FROM cumulative_state WHERE rule_id=? AND code=?',
+        (cum_rule['id'], code)).fetchone()
+    if not state or not state['baseline_nav'] or state['baseline_nav'] <= 0:
+        conn.close()
+        return []
+    base = state['baseline_nav']
+    # 用最新净值（优先 unit_nav，回退 estimated_nav）
+    nav = last['unit_nav']
+    if not nav or nav <= 0:
+        nav = last['estimated_nav']
+    if not nav or nav <= 0:
+        conn.close()
+        return []
+    cum = (nav - base) / base * 100
+    hit = _hit_direction(cum, cum_rule['threshold'], cum_rule['direction'])
+    alerts = []
+    if hit and not _already_alerted(
+            conn, code, 'cumulative', hit, 'cum_confirm', tstr):
+        up_down = '上涨' if hit == 'up' else '下跌'
+        msg = ('【%s】(%s) 累计%s已达 %.2f%%（手动设置基准后即时评估），'
+               '触发节点并重置基准为当前净值 %.4f') % (
+            fund['name'], code, up_down, cum, nav)
+        alerts.append(_mk_alert(code, fund['name'], 'cumulative', hit,
+                                'cum_confirm', cum, msg))
+        conn.execute(
+            'UPDATE cumulative_state SET baseline_nav=?, baseline_date=? WHERE id=?',
+            (nav, tstr, state['id']))
+        conn.commit()
+    conn.close()
+    return alerts
+
+
 def evaluate_all():
     """评估所有启用基金的规则，返回需要提醒的 alert 列表"""
     conn = database.get_conn()

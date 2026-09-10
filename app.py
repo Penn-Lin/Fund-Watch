@@ -543,6 +543,86 @@ def api_del_rule(rid):
     return jsonify({'ok': True})
 
 
+# ------------------------- 手动设置基准净值 -------------------------
+
+@app.route('/api/baseline', methods=['POST'])
+def api_reset_baseline():
+    """手动设置基金累计节点基准净值，设置后立即评估：
+
+    - 若当前净值 vs 新基准未穿越阈值：基准保持用户设的值，正常累计等待
+    - 若已穿越阈值：触发 cum_confirm 提醒（"定投信号"），并重置基准为
+      当前净值，开始累计下一段——实现"每跌4%定投"的节点逻辑。
+    """
+    data = request.get_json(silent=True) or {}
+    code = str(data.get('code', '')).strip()
+    try:
+        baseline_nav = float(data.get('baseline_nav', 0))
+    except (TypeError, ValueError):
+        baseline_nav = 0
+    baseline_date = str(data.get('baseline_date') or rule_engine.today_str())
+    if not code or baseline_nav <= 0:
+        return jsonify({'error': '请填写有效的基金代码和基准净值'}), 400
+
+    conn = database.get_conn()
+    fund = conn.execute(
+        'SELECT * FROM funds WHERE code=?', (code,)).fetchone()
+    if not fund:
+        conn.close()
+        return jsonify({'error': '基金不存在'}), 400
+    cum_rule = conn.execute(
+        "SELECT * FROM rules WHERE rule_type='cumulative' AND enabled=1 AND code=? "
+        "ORDER BY id LIMIT 1", (code,)).fetchone()
+    if not cum_rule:
+        cum_rule = conn.execute(
+            "SELECT * FROM rules WHERE rule_type='cumulative' AND enabled=1 "
+            "AND code='GLOBAL' ORDER BY id LIMIT 1").fetchone()
+    if not cum_rule:
+        conn.close()
+        return jsonify({'error': '未启用累计规则，请先在「规则」页开启累计涨跌节点'}), 400
+
+    st = conn.execute(
+        'SELECT * FROM cumulative_state WHERE rule_id=? AND code=?',
+        (cum_rule['id'], code)).fetchone()
+    if st:
+        conn.execute(
+            'UPDATE cumulative_state SET baseline_nav=?, baseline_date=? WHERE id=?',
+            (baseline_nav, baseline_date, st['id']))
+    else:
+        conn.execute(
+            'INSERT INTO cumulative_state (rule_id, code, baseline_nav, baseline_date) '
+            'VALUES (?,?,?,?)', (cum_rule['id'], code, baseline_nav, baseline_date))
+    conn.commit()
+    conn.close()
+
+    # 立即评估：若已穿越阈值则触发提醒并重置基准为当前净值
+    cfg = load_config()
+    alerts = rule_engine.evaluate_baseline_reset(code)
+    for a in alerts:
+        conn = database.get_conn()
+        cur = conn.execute(
+            'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
+            'current_change, trigger_time, message, notify_status) '
+            'VALUES (?,?,?,?,?,?,?,?,?)',
+            (a['code'], a['name'], a['rule_type'], a['direction'], a['kind'],
+             a['current_change'], rule_engine.now_str(), a['message'], 'pending'))
+        aid = cur.lastrowid
+        conn.commit()
+        conn.close()
+        result = notifier.send_alert(cfg, '基金涨跌提醒', a['message'])
+        status = 'sent' if result['ok'] else 'failed'
+        conn = database.get_conn()
+        conn.execute('UPDATE alert_log SET notify_status=? WHERE id=?', (status, aid))
+        conn.commit()
+        conn.close()
+
+    triggered = len(alerts)
+    return jsonify({
+        'ok': True,
+        'triggered': triggered,
+        'message': alerts[0]['message'] if alerts else None,
+    })
+
+
 # ------------------------- 监控记录 -------------------------
 
 @app.route('/api/alerts')

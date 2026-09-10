@@ -208,6 +208,15 @@ function renderFunds(funds) {
           <div class="d-row"><span class="dk">节点基准</span><span class="dv">${f.baseline_nav ? num(f.baseline_nav, 4) + '（' + (f.baseline_date || '') + '）' : '待初始化'}</span></div>
           <div class="d-row"><span class="dk">节点步长</span><span class="dv">${f.cum_threshold ? f.cum_threshold + '%' : '未设置'}</span></div>
         </div>
+        <div class="baseline-reset">
+          <div class="bl-title">手动设置基准净值</div>
+          <p class="hint">设定一个净值作为累计起点（如阶段高点）。若当前已穿越节点阈值，会立即触发提醒并从当前净值重新累计下一段——实现"每跌4%定投"。</p>
+          <div class="bl-input-row">
+            <input type="number" step="0.0001" min="0.0001" placeholder="基准净值" data-bl-nav value="${f.unit_nav != null ? f.unit_nav : ''}">
+            <input type="date" data-bl-date>
+          </div>
+          <button class="btn-primary bl-btn" data-act="reset-bl" data-code="${f.code}">设置并评估</button>
+        </div>
         <div class="fund-ops">
           <button data-act="toggle" data-id="${f.id}" data-on="${on ? 1 : 0}">${on ? '暂停监控' : '恢复监控'}</button>
           <button class="warn" data-act="del" data-id="${f.id}">删除</button>
@@ -236,9 +245,33 @@ $('#fund-list').addEventListener('click', async (e) => {
           body: JSON.stringify({ enabled: btn.dataset.on !== '1' }),
         });
         toast('已更新');
+      } else if (btn.dataset.act === 'reset-bl') {
+        const code = btn.dataset.code;
+        const card = btn.closest('.fund-card');
+        const navInput = card.querySelector('[data-bl-nav]');
+        const dateInput = card.querySelector('[data-bl-date]');
+        const nav = parseFloat(navInput.value);
+        const date = dateInput.value || new Date().toISOString().slice(0, 10);
+        if (!nav || nav <= 0) { toast('请输入有效的基准净值'); return; }
+        btn.disabled = true; btn.textContent = '设置中…';
+        const r = await api('/api/baseline', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code, baseline_nav: nav, baseline_date: date }),
+        });
+        if (r.triggered > 0) {
+          toast('基准已设置，当前已穿越阈值——已触发提醒并重置为当前净值');
+        } else {
+          toast('基准已设置为 ' + nav.toFixed(4) + '，从该点开始累计');
+        }
       }
+      // 统一刷新（del/toggle/reset-bl 成功后都刷新列表）
+      if (btn.dataset.act === 'reset-bl') { delete chartCache[btn.dataset.code]; }
       loadFunds(); loadSummary();
     } catch (err) { toast(err.message); }
+    finally {
+      const blBtn = e.target.closest('[data-act="reset-bl"]');
+      if (blBtn) { blBtn.disabled = false; blBtn.textContent = '设置并评估'; }
+    }
     return;
   }
 

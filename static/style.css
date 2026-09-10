@@ -191,6 +191,26 @@ main { padding: 14px 14px 96px; }
 }
 .fund-ops button.warn { color: var(--red); border-color: #f6cfce; background: #fff7f6; }
 
+/* 手动设置基准净值区 */
+.baseline-reset {
+  margin: 6px 16px 4px; padding: 12px;
+  background: #f8f9fb; border-radius: 12px;
+}
+.bl-title { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.baseline-reset .hint { font-size: 11px; color: var(--text-3); line-height: 1.5; margin-bottom: 8px; }
+.bl-input-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.bl-input-row input {
+  flex: 1; border: 1.5px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; font-size: 13px; background: #fff; outline: none;
+  font-variant-numeric: tabular-nums;
+}
+.bl-input-row input:focus { border-color: var(--primary); }
+.bl-btn {
+  width: 100%; padding: 9px; font-size: 13px; border-radius: 8px;
+  border: none; cursor: pointer;
+}
+.bl-btn:disabled { opacity: .6; cursor: not-allowed; }
+
 /* ===== 通用卡片 ===== */
 .card {
   background: var(--card); border-radius: 16px; box-shadow: var(--shadow);
