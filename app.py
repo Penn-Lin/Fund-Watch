@@ -39,8 +39,25 @@ def save_config(cfg):
     database.save_config(cfg)
 
 
+_scan_lock = threading.Lock()
+
+
 def scan_once():
-    """抓取所有启用基金数据 -> 评估规则 -> 发通知，返回 (抓取数, 提醒数)"""
+    """抓取所有启用基金数据 -> 评估规则 -> 发通知，返回 (抓取数, 提醒数)
+
+    加扫描锁：后台 scheduler 与 cron-job 触发的 /api/refresh 不会同时执行，
+    避免重复请求东财接口触发限流、占满 gunicorn 单 worker 导致服务卡死。
+    """
+    if not _scan_lock.acquire(blocking=False):
+        return -1, 0  # 已有扫描进行中，跳过
+    try:
+        return _scan_once_impl()
+    finally:
+        _scan_lock.release()
+
+
+def _scan_once_impl():
+    """实际扫描逻辑"""
     cfg = load_config()
     fetched = 0
     conn = database.get_conn()
