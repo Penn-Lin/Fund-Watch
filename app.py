@@ -103,12 +103,93 @@ def _interval():
     return int(load_config().get('off_hours_interval_seconds', 600))
 
 
+# ------------------------- 收盘汇总推送 -------------------------
+
+def _build_summary_message():
+    """生成当日收盘汇总消息，返回 (msg, 条数)；无启用基金返回 (None, 0)"""
+    conn = database.get_conn()
+    funds = conn.execute('SELECT * FROM funds WHERE enabled=1').fetchall()
+    lines = []
+    today = rule_engine.today_str()
+    for f in funds:
+        last = conn.execute(
+            'SELECT * FROM nav_history WHERE code=? ORDER BY id DESC LIMIT 1',
+            (f['code'],)).fetchone()
+        if not last:
+            continue
+        # 晚间净值已确认用实际值，未确认则回退估值
+        chg = (last['actual_change'] if last['nav_date'] == today
+               else (last['estimated_change']
+                     if last['estimated_change'] is not None
+                     else last['actual_change']))
+        if chg is None:
+            continue
+        sign = '+' if chg > 0 else ''
+        nav = last['unit_nav']
+        date_tag = '' if last['nav_date'] == today else '（%s）' % (last['nav_date'] or '')
+        lines.append('· %s(%s) %s%s%%，净值 %s%s' % (
+            f['name'], f['code'], sign, '%.2f' % chg,
+            '%.4f' % nav if nav else '—', date_tag))
+    conn.close()
+    if not lines:
+        return None, 0
+    weekday = '周' + '一二三四五六日'[datetime.date.today().weekday()]
+    msg = '📊 收盘汇总 %s %s\n%s' % (today, weekday, '\n'.join(lines))
+    return msg, len(lines)
+
+
+def maybe_send_summary():
+    """到达配置时间后推送当日汇总（每交易日一次，alert_log 记录去重）"""
+    cfg = load_config()
+    ds = cfg.get('daily_summary') or {}
+    if not ds.get('enabled'):
+        return False
+    hhmm = str(ds.get('time') or '20:00')
+    now = datetime.datetime.now()
+    if not rule_engine.is_trading_day(now):
+        return False
+    try:
+        h, m = (int(x) for x in hhmm.split(':'))
+    except Exception:
+        return False
+    if (now.hour, now.minute) < (h, m):
+        return False
+    today = rule_engine.today_str()
+    conn = database.get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM alert_log WHERE kind='daily_summary' "
+        "AND trigger_time LIKE ?", (today + '%',)).fetchone()
+    conn.close()
+    if row['c'] > 0:
+        return False  # 今天已发过
+
+    msg, _ = _build_summary_message()
+    if msg is None:
+        return False
+    result = notifier.send_alert(cfg, '基金监控 · 收盘汇总', msg)
+    conn = database.get_conn()
+    conn.execute(
+        'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
+        'current_change, trigger_time, message, notify_status) '
+        "VALUES ('SUMMARY', '收盘汇总', 'summary', NULL, 'daily_summary', "
+        'NULL, ?, ?, ?)',
+        (rule_engine.now_str(), msg,
+         'sent' if result['ok'] else 'failed'))
+    conn.commit()
+    conn.close()
+    return True
+
+
 def scheduler_loop():
     while True:
         try:
             scan_once()
         except Exception as e:
             print('scan error:', e)
+        try:
+            maybe_send_summary()
+        except Exception as e:
+            print('summary error:', e)
         try:
             time.sleep(_interval())
         except Exception:
@@ -427,6 +508,12 @@ def api_config():
               'scan_interval_seconds', 'off_hours_interval_seconds'):
         if k in data:
             cfg[k] = data[k]
+    if 'daily_summary' in data:
+        ds = data['daily_summary'] or {}
+        cfg['daily_summary'] = {
+            'enabled': bool(ds.get('enabled')),
+            'time': str(ds.get('time') or '20:00'),
+        }
     if 'email' in data:
         cfg['email'] = data['email']
     save_config(cfg)

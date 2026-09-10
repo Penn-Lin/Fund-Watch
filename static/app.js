@@ -38,6 +38,7 @@ const DIR_TEXT = { up: '上涨', down: '下跌', both: '涨跌双向' };
 const RULE_TEXT = { daily: '当日涨跌', cumulative: '累计节点' };
 const KIND_TEXT = {
   daily: '当日阈值', cum_estimate: '累计估值预警', cum_confirm: '累计净值确认',
+  daily_summary: '收盘汇总',
 };
 
 /* ---------------- Tab 切换（底部导航） ---------------- */
@@ -442,7 +443,8 @@ async function loadAlerts() {
         <div class="alert-msg">${esc(a.message || '')}</div>
         <div class="alert-tags">
           <span class="tag">${KIND_TEXT[a.kind] || a.kind}</span>
-          <span class="tag ${cls(a.current_change)}">${pct(a.current_change)}</span>
+          ${a.kind === 'daily_summary' ? '' : `
+          <span class="tag ${cls(a.current_change)}">${pct(a.current_change)}</span>`}
           <span class="tag">${a.notify_status === 'sent' ? '✓ 已推送' : (a.notify_status === 'failed' ? '推送失败' : a.notify_status)}</span>
         </div>
       </div>`).join('');
@@ -472,6 +474,9 @@ async function loadConfig() {
   $('#cf-to').value = (e.to_addrs || []).join(',');
   $('#cf-in').value = cfg.scan_interval_seconds || 60;
   $('#cf-off').value = cfg.off_hours_interval_seconds || 600;
+  const ds = cfg.daily_summary || {};
+  $('#cf-sum-time').value = ds.time || '20:00';
+  $('#cf-sum-on').checked = !!ds.enabled;
 }
 
 $('#btn-save-cfg').addEventListener('click', async () => {
@@ -481,6 +486,10 @@ $('#btn-save-cfg').addEventListener('click', async () => {
       pushplus_token: $('#cf-pt').value.trim(),
       scan_interval_seconds: parseInt($('#cf-in').value) || 60,
       off_hours_interval_seconds: parseInt($('#cf-off').value) || 600,
+      daily_summary: {
+        enabled: $('#cf-sum-on').checked,
+        time: $('#cf-sum-time').value || '20:00',
+      },
       email: {
         smtp_host: $('#cf-host').value.trim(),
         smtp_port: parseInt($('#cf-port').value) || 465,
