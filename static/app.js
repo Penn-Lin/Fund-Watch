@@ -329,13 +329,13 @@ function sparkline(hist, baseline) {
 }
 
 /* ---------------- 添加基金（弹窗） ---------------- */
-function openSheet(sheetId) {
-  $('#' + sheetId + '-mask').classList.add('show');
-  $('#' + sheetId).classList.add('show');
+function openSheet(id) {
+  $('#' + id + '-mask').classList.add('show');
+  $('#' + id + '-sheet').classList.add('show');
 }
-function closeSheet(sheetId) {
-  $('#' + sheetId + '-mask').classList.remove('show');
-  $('#' + sheetId).classList.remove('show');
+function closeSheet(id) {
+  $('#' + id + '-mask').classList.remove('show');
+  $('#' + id + '-sheet').classList.remove('show');
 }
 $('#btn-add-open').addEventListener('click', () => {
   $('#add-code').value = '';
