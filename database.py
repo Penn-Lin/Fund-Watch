@@ -16,6 +16,19 @@ DB_PATH = os.path.join(DATA_DIR, 'fund_monitor.db')
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
 USE_PG = bool(DATABASE_URL)
 
+# psycopg2 必须在模块顶部导入，不能在 PgConn.__init__ 函数体内导入：
+# gunicorn 多线程环境下，8 个 worker 线程并发首次调用 get_conn 时会同时
+# 执行 `import psycopg2.extras`，触发 psycopg2.extensions 的循环导入错误
+# (cannot import name 'cursor' from partially initialized module ...)。
+# 顶部导入在 gunicorn 启动(单线程)时即完成，避免运行时并发 import。
+try:
+    import psycopg2
+    import psycopg2.extras
+    _PSYCOPG2_OK = True
+except ImportError:
+    psycopg2 = None
+    _PSYCOPG2_OK = False
+
 DEFAULT_CONFIG = {
     'scan_interval_seconds': 60,
     'off_hours_interval_seconds': 600,
@@ -56,8 +69,7 @@ class PgConn:
     """psycopg2 连接包装：兼容 sqlite3 的 conn.execute 风格"""
 
     def __init__(self, dsn):
-        import psycopg2
-        import psycopg2.extras
+        # psycopg2 已在模块顶部导入(避免函数体内 import 的循环导入问题)。
         # 直接用原始 DSN(Neon pooler 端点)连接，不做直连端点转换、不设
         # statement_timeout options。理由：
         #   1) Neon pooler 拒绝 options 里的 statement_timeout(报
