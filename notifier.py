@@ -99,8 +99,9 @@ def send_alert(cfg, title, content):
     if ec.get('smtp_host') and ec.get('username') and ec.get('to_addrs'):
         try:
             results['email'] = send_email(ec, title, content)
-        except Exception:
+        except Exception as e:
             results['email'] = False
+            results['email_error'] = str(e)[:200]  # 暴露真实失败原因（授权码错/海外IP被拒等）
 
     # Web Push：从 DB 查所有订阅推送，失效订阅自动清理
     wp_detail = None

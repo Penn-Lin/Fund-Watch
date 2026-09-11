@@ -413,9 +413,15 @@ $('#btn-refresh').addEventListener('click', async () => {
   b.classList.add('spinning');
   try {
     const r = await api('/api/refresh', { method: 'POST' });
-    toast(`已刷新 ${r.fetched} 只基金，触发 ${r.alerts} 条提醒`);
-    Object.keys(chartCache).forEach((k) => delete chartCache[k]);
-    loadFunds(); loadSummary();
+    if (r.fetched < 0) {
+      const stageTxt = { fetching: '正在抓取行情', evaluating: '正在评估规则',
+        notifying: '正在发送通知' }[r.stage] || r.stage || '进行中';
+      toast(`上一轮扫描${stageTxt}，请稍候再刷新`);
+    } else {
+      toast(`已刷新 ${r.fetched} 只基金，触发 ${r.alerts} 条提醒`);
+      Object.keys(chartCache).forEach((k) => delete chartCache[k]);
+      loadFunds(); loadSummary();
+    }
   } catch (e) { toast(e.message); }
   finally { setTimeout(() => b.classList.remove('spinning'), 600); }
 });

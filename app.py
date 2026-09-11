@@ -40,25 +40,37 @@ def save_config(cfg):
 
 
 _scan_lock = threading.Lock()
+_scan_stage = 'idle'  # 扫描阶段：idle/fetching/evaluating/notifying，busy 时供诊断
 
 
 def scan_once():
-    """抓取所有启用基金数据 -> 评估规则 -> 发通知，返回 (抓取数, 提醒数)
+    """抓取数据 → 评估规则 → 入库(pending)；通知异步派发，不持扫描锁
 
-    加扫描锁：后台 scheduler 与 cron-job 触发的 /api/refresh 不会同时执行，
-    避免重复请求东财接口触发限流、占满 gunicorn 单 worker 导致服务卡死。
+    关键设计：通知发送（email/webpush 等慢渠道）移到锁释放后的独立线程，
+    避免 163 邮箱 SMTP 从 Render 海外 IP 连接慢/失败时拖住扫描锁，
+    导致手动刷新一直返回 -1（拿不到锁）。
     """
+    global _scan_stage
     if not _scan_lock.acquire(blocking=False):
-        return -1, 0  # 已有扫描进行中，跳过
+        return -1, 0, _scan_stage  # 已有扫描进行中，返回当前阶段供前端提示
     try:
-        return _scan_once_impl()
+        _scan_stage = 'fetching'
+        fetched, pending = _scan_once_impl()
+        _scan_stage = 'idle'
     finally:
         _scan_lock.release()
+    # 锁已释放：异步发通知，慢 email/webpush 不阻塞调度循环与手动刷新
+    if pending:
+        threading.Thread(target=_dispatch_alerts, args=(pending,), daemon=True).start()
+    return fetched, len(pending), 'idle'
 
 
 def _scan_once_impl():
-    """实际扫描逻辑"""
-    cfg = load_config()
+    """抓取数据 + 评估规则 + 插入 pending 提醒，返回 (fetched, [(aid, alert), ...])
+
+    只做 DB 读写，不发通知（通知由 _dispatch_alerts 异步完成），保证锁内逻辑都快速完成。
+    """
+    global _scan_stage
     fetched = 0
     conn = database.get_conn()
     # 清理 90 天前的历史快照，控制数据量
@@ -91,7 +103,9 @@ def _scan_once_impl():
             except Exception:
                 pass
 
+    _scan_stage = 'evaluating'
     alerts = rule_engine.evaluate_all()
+    pending = []
     for a in alerts:
         conn = database.get_conn()
         cur = conn.execute(
@@ -103,14 +117,36 @@ def _scan_once_impl():
         aid = cur.lastrowid
         conn.commit()
         conn.close()
+        pending.append((aid, a))
+    return fetched, pending
 
-        result = notifier.send_alert(cfg, '基金涨跌提醒', a['message'])
-        status = 'sent' if result['ok'] else 'failed'
-        conn = database.get_conn()
-        conn.execute('UPDATE alert_log SET notify_status=? WHERE id=?', (status, aid))
-        conn.commit()
-        conn.close()
-    return fetched, len(alerts)
+
+def _dispatch_alerts(pending):
+    """异步发送通知并更新状态（在锁释放后的独立线程运行）
+
+    慢渠道（email SMTP 从海外连 163、webpush）失败/超时不会阻塞扫描锁
+    与调度循环；失败记 'failed'，成功记 'sent'。
+    """
+    global _scan_stage
+    _scan_stage = 'notifying'
+    try:
+        cfg = load_config()
+        for aid, alert in pending:
+            try:
+                result = notifier.send_alert(cfg, '基金涨跌提醒', alert['message'])
+                status = 'sent' if result['ok'] else 'failed'
+            except Exception:
+                status = 'failed'
+            try:
+                conn = database.get_conn()
+                conn.execute('UPDATE alert_log SET notify_status=? WHERE id=?',
+                             (status, aid))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+    finally:
+        _scan_stage = 'idle'
 
 
 def _interval():
@@ -764,8 +800,8 @@ def api_config():
 
 @app.route('/api/refresh', methods=['POST'])
 def api_refresh():
-    fetched, alerts = scan_once()
-    return jsonify({'ok': True, 'fetched': fetched, 'alerts': alerts})
+    fetched, alerts, stage = scan_once()
+    return jsonify({'ok': True, 'fetched': fetched, 'alerts': alerts, 'stage': stage})
 
 
 @app.route('/api/test_notify', methods=['POST'])
