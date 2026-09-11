@@ -28,9 +28,19 @@ class PgConn:
     def __init__(self, dsn):
         import psycopg2
         import psycopg2.extras
-        # connect_timeout=10：Neon 免费层会自动暂停，无超时会导致 connect hang 死、
-        # scheduler 线程卡在持锁状态，之后所有 /api/refresh 都拿不到锁返回 -1
-        self.conn = psycopg2.connect(dsn, connect_timeout=10)
+        # connect_timeout=10 + statement_timeout=15s + keepalives：
+        # Neon 免费层 compute 会自动暂停，暂停后连接被代理层接受但查询无限期挂起
+        # （psycopg2 默认无 statement_timeout）。这会导致 scan_once 卡在第一个
+        # DELETE/SELECT 查询、扫描锁被永久占用、所有手动 refresh 返回 -1。
+        # statement_timeout 让查询 15s 后快速失败，scan_once 异常释放锁，scheduler
+        # 得以继续循环（下一轮 Neon 已冷启动完成即可正常）。
+        self.conn = psycopg2.connect(
+            dsn,
+            connect_timeout=10,
+            options='-c statement_timeout=15000',
+            keepalives=1, keepalives_idle=30,
+            keepalives_interval=10, keepalives_count=3,
+        )
         self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         self._lastrowid = None
 

@@ -351,24 +351,30 @@ def maybe_eval_indices():
 
 def scheduler_loop():
     while True:
+        cycle_ok = True
         try:
             scan_once()
         except Exception as e:
             print('scan error:', e)
+            cycle_ok = False
         try:
             maybe_send_summary()
         except Exception as e:
             print('summary error:', e)
+            cycle_ok = False
         try:
             maybe_eval_indices()
         except Exception as e:
             print('index alert error:', e)
+            cycle_ok = False
         try:
             maybe_send_index_summary()
         except Exception as e:
             print('index summary error:', e)
+            cycle_ok = False
+        # 失败时快速重试（Neon 冷启动/网络抖动后能自愈），成功时按配置间隔
         try:
-            time.sleep(_interval())
+            time.sleep(60 if not cycle_ok else _interval())
         except Exception:
             time.sleep(60)
 
