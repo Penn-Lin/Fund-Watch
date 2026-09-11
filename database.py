@@ -28,22 +28,51 @@ class PgConn:
     def __init__(self, dsn):
         import psycopg2
         import psycopg2.extras
-        # connect_timeout=10 + keepalives：Neon 免费层 compute 会自动暂停，
-        # 暂停后连接被代理层接受但查询可能挂起。
-        # 注意：Neon 的 -pooler 端点(PgBouncer)不支持把 statement_timeout 放进
-        # options 启动参数(会报 unsupported startup parameter 导致连接失败)，
-        # 所以改用连接后执行 SET 语句设置——PgBouncer 会跟踪 statement_timeout
-        # 参数，后续查询都受 15s 超时保护，防止 compute 暂停时查询无限期挂起、
-        # scan_once 卡死、扫描锁被永久占用。
-        self.conn = psycopg2.connect(
-            dsn,
-            connect_timeout=10,
-            keepalives=1, keepalives_idle=30,
-            keepalives_interval=10, keepalives_count=3,
-        )
+        from urllib.parse import urlparse, parse_qsl
+        # Neon compute 会自动暂停，暂停后查询会无限期挂起(psycopg2 默认无
+        # statement_timeout)，导致 scan_once 卡在第一个查询、扫描锁被永久占。
+        # 必须 statement_timeout 保护查询。但有两个坑：
+        #   1) Neon -pooler 端点(PgBouncer)拒绝 options 启动参数里的
+        #      statement_timeout(报 unsupported startup parameter)。
+        #   2) 若改用连接后执行 SET 语句设 statement_timeout，SET 本身在
+        #      compute 暂停时会无限挂起(statement_timeout 还没生效，无法
+        #      保护自己——鸡生蛋死锁)。
+        # Neon 官方建议：要用 statement_timeout 就用 unpooled(直连)端点。
+        # 故若 DSN 指向 -pooler 端点，自动改用直连端点(去掉 host 里的
+        # -pooler)，通过 options 启动参数在连接建立时即设好 statement_timeout
+        # (受 connect_timeout=10 保护)。直连端点在 compute 暂停时 connect
+        # 会 10s 超时失败→异常→scan_once 释放锁→scheduler 60s 重试→
+        # compute 冷启动完成后即正常，自愈。
+        kwargs = {
+            'connect_timeout': 10,
+            'options': '-c statement_timeout=15000',
+            'keepalives': 1, 'keepalives_idle': 30,
+            'keepalives_interval': 10, 'keepalives_count': 3,
+        }
+        try:
+            u = urlparse(dsn)
+            host = u.hostname or ''
+            if '-pooler' in host:
+                host = host.replace('-pooler', '')  # 改用直连端点
+            if host:
+                kwargs['host'] = host
+            if u.username:
+                kwargs['user'] = u.username
+            if u.password:
+                kwargs['password'] = u.password
+            if u.path and len(u.path) > 1:
+                kwargs['dbname'] = u.path[1:]  # 去掉前导 /
+            if u.port:
+                kwargs['port'] = u.port
+            for k, v in parse_qsl(u.query):  # 保留 sslmode 等
+                if k != 'options':
+                    kwargs[k] = v
+            self.conn = psycopg2.connect(**kwargs)
+        except Exception:
+            # 解析失败退回原 DSN(无 options，至少能连，但无 statement_timeout)
+            self.conn = psycopg2.connect(dsn, connect_timeout=10)
         self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         self._lastrowid = None
-        self.cur.execute("SET statement_timeout = 15000")
 
     def execute(self, sql, args=()):
         s = sql.replace('?', '%s') if '?' in sql else sql
