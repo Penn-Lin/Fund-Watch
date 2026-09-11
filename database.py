@@ -58,55 +58,19 @@ class PgConn:
     def __init__(self, dsn):
         import psycopg2
         import psycopg2.extras
-        from urllib.parse import urlparse, parse_qsl
-        # Neon compute 会自动暂停，暂停后查询会无限期挂起(psycopg2 默认无
-        # statement_timeout)，导致 scan_once 卡在第一个查询、扫描锁被永久占。
-        # 必须 statement_timeout 保护查询。但有两个坑：
-        #   1) Neon -pooler 端点(PgBouncer)拒绝 options 启动参数里的
-        #      statement_timeout(报 unsupported startup parameter)。
-        #   2) 若改用连接后执行 SET 语句设 statement_timeout，SET 本身在
-        #      compute 暂停时会无限挂起(statement_timeout 还没生效，无法
-        #      保护自己——鸡生蛋死锁)。
-        # Neon 官方建议：要用 statement_timeout 就用 unpooled(直连)端点。
-        # 故若 DSN 指向 -pooler 端点，自动改用直连端点(去掉 host 里的
-        # -pooler)，通过 options 启动参数在连接建立时即设好 statement_timeout。
-        #
-        # 还有第三个坑(本次实测确认)：libpq 的 connect_timeout 在 Neon compute
-        # 冷启动期间不完全可靠(TCP/SSL 握手阶段可能不触发)，connect 会永久
-        # 挂起→scan_once 卡在 get_conn→扫描锁被永久占→所有手动 refresh 返回
-        # -1。解决：用子线程给 psycopg2.connect 套硬超时(thread.join)，保证
-        # 必定有返回。超时→TimeoutError→scan_once finally 释放锁→scheduler
-        # 60s 重试→compute 冷启动完成后即正常，自愈。
-        kwargs = {
-            'connect_timeout': 10,
-            'options': '-c statement_timeout=15000',
-            'keepalives': 1, 'keepalives_idle': 30,
-            'keepalives_interval': 10, 'keepalives_count': 3,
-        }
-        try:
-            u = urlparse(dsn)
-            host = u.hostname or ''
-            if '-pooler' in host:
-                host = host.replace('-pooler', '')  # 改用直连端点
-            if host:
-                kwargs['host'] = host
-            if u.username:
-                kwargs['user'] = u.username
-            if u.password:
-                kwargs['password'] = u.password
-            if u.path and len(u.path) > 1:
-                kwargs['dbname'] = u.path[1:]  # 去掉前导 /
-            if u.port:
-                kwargs['port'] = u.port
-            for k, v in parse_qsl(u.query):  # 保留 sslmode 等
-                if k != 'options':
-                    kwargs[k] = v
-            self.conn = _connect_with_hard_timeout(
-                lambda: psycopg2.connect(**kwargs), 20)
-        except Exception:
-            # 解析失败退回原 DSN(无 options，至少能连，但无 statement_timeout)
-            self.conn = _connect_with_hard_timeout(
-                lambda: psycopg2.connect(dsn, connect_timeout=10), 20)
+        # 直接用原始 DSN(Neon pooler 端点)连接，不做直连端点转换、不设
+        # statement_timeout options。理由：
+        #   1) Neon pooler 拒绝 options 里的 statement_timeout(报
+        #      unsupported startup parameter)，直连端点虽支持但 compute
+        #      暂停时 connect 会挂起(冷启动)。
+        #   2) 我们已用线程硬超时保护 connect(20s) 和 execute/fetch(20s)，
+        #      statement_timeout 的"防查询挂起"作用已被 execute 硬超时替代。
+        # 三层防线：connect 硬超时 + execute/fetch 硬超时 + scheduler 重试，
+        # 任何一层超时都抛异常 → scan_once finally 释放锁 → 自愈。
+        self.conn = _connect_with_hard_timeout(
+            lambda: psycopg2.connect(dsn, connect_timeout=10, keepalives=1,
+                                     keepalives_idle=30, keepalives_interval=10,
+                                     keepalives_count=3), 20)
         self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         self._lastrowid = None
 
