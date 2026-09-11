@@ -22,6 +22,36 @@ DEFAULT_CONFIG = {
 }
 
 
+def _connect_with_hard_timeout(connect_fn, timeout=20):
+    """用子线程给 psycopg2.connect 套硬超时。
+
+    libpq 的 connect_timeout 参数在 Neon compute 冷启动期间不完全可靠
+    (TCP/SSL 握手阶段可能不触发)，connect 会永久挂起。用线程 join(timeout)
+    保证必定有返回：超时→TimeoutError→scan_once finally 释放锁→
+    scheduler 60s 重试→compute 冷启动完成后即自愈。
+
+    超时后子线程仍在后台运行(daemon)，最终会因服务端关闭而结束，无泄漏风险。
+    """
+    import threading
+    box = {}
+
+    def _work():
+        try:
+            box['result'] = connect_fn()
+        except BaseException as e:
+            box['error'] = e
+
+    t = threading.Thread(target=_work, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError(
+            f'DB connect exceeded {timeout}s (likely Neon compute cold-start)')
+    if 'error' in box:
+        raise box['error']
+    return box['result']
+
+
 class PgConn:
     """psycopg2 连接包装：兼容 sqlite3 的 conn.execute 风格"""
 
@@ -39,10 +69,14 @@ class PgConn:
         #      保护自己——鸡生蛋死锁)。
         # Neon 官方建议：要用 statement_timeout 就用 unpooled(直连)端点。
         # 故若 DSN 指向 -pooler 端点，自动改用直连端点(去掉 host 里的
-        # -pooler)，通过 options 启动参数在连接建立时即设好 statement_timeout
-        # (受 connect_timeout=10 保护)。直连端点在 compute 暂停时 connect
-        # 会 10s 超时失败→异常→scan_once 释放锁→scheduler 60s 重试→
-        # compute 冷启动完成后即正常，自愈。
+        # -pooler)，通过 options 启动参数在连接建立时即设好 statement_timeout。
+        #
+        # 还有第三个坑(本次实测确认)：libpq 的 connect_timeout 在 Neon compute
+        # 冷启动期间不完全可靠(TCP/SSL 握手阶段可能不触发)，connect 会永久
+        # 挂起→scan_once 卡在 get_conn→扫描锁被永久占→所有手动 refresh 返回
+        # -1。解决：用子线程给 psycopg2.connect 套硬超时(thread.join)，保证
+        # 必定有返回。超时→TimeoutError→scan_once finally 释放锁→scheduler
+        # 60s 重试→compute 冷启动完成后即正常，自愈。
         kwargs = {
             'connect_timeout': 10,
             'options': '-c statement_timeout=15000',
@@ -67,10 +101,12 @@ class PgConn:
             for k, v in parse_qsl(u.query):  # 保留 sslmode 等
                 if k != 'options':
                     kwargs[k] = v
-            self.conn = psycopg2.connect(**kwargs)
+            self.conn = _connect_with_hard_timeout(
+                lambda: psycopg2.connect(**kwargs), 20)
         except Exception:
             # 解析失败退回原 DSN(无 options，至少能连，但无 statement_timeout)
-            self.conn = psycopg2.connect(dsn, connect_timeout=10)
+            self.conn = _connect_with_hard_timeout(
+                lambda: psycopg2.connect(dsn, connect_timeout=10), 20)
         self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         self._lastrowid = None
 
