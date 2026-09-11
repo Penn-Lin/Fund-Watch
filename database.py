@@ -110,19 +110,52 @@ class PgConn:
         self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         self._lastrowid = None
 
+    def _run_with_timeout(self, fn, timeout=20):
+        """用子线程给任意 DB 操作套硬超时（第三道防线，兜底）。
+
+        statement_timeout(服务端) 与 connect 硬超时之外的兜底：
+        Neon compute 暂停时，即使 options statement_timeout 未生效
+        (如直连端点不可用 fallback 到 pooler、或 SET 被 PgBouncer 丢弃)，
+        查询也会在 timeout 秒后强制放弃，抛 TimeoutError → scan_once
+        finally 释放锁 → scheduler 60s 重试 → 冷启动完成后自愈。
+
+        超时后子线程仍持连接在后台(daemon)，连接由 Neon 服务端 idle
+        timeout 回收，不阻塞锁释放。
+        """
+        import threading
+        box = {}
+
+        def _work():
+            try:
+                box['result'] = fn()
+            except BaseException as e:
+                box['error'] = e
+
+        t = threading.Thread(target=_work, daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            raise TimeoutError(
+                f'DB operation exceeded {timeout}s (Neon cold-start)')
+        if 'error' in box:
+            raise box['error']
+        return box.get('result')
+
     def execute(self, sql, args=()):
         s = sql.replace('?', '%s') if '?' in sql else sql
         # 普通 INSERT 自动追加 RETURNING id 以模拟 lastrowid；
         # 带 ON CONFLICT 的自定义 UPSERT（如 config 表，无 id 列）不追加
-        if (s.lstrip().upper().startswith('INSERT')
-                and 'RETURNING' not in s.upper()
-                and 'ON CONFLICT' not in s.upper()):
-            s += ' RETURNING id'
-            self.cur.execute(s, args)
-            row = self.cur.fetchone()
-            self._lastrowid = row['id'] if row else None
-            return self
-        self.cur.execute(s, args)
+        def _do():
+            if (s.lstrip().upper().startswith('INSERT')
+                    and 'RETURNING' not in s.upper()
+                    and 'ON CONFLICT' not in s.upper()):
+                s2 = s + ' RETURNING id'
+                self.cur.execute(s2, args)
+                row = self.cur.fetchone()
+                self._lastrowid = row['id'] if row else None
+            else:
+                self.cur.execute(s, args)
+        self._run_with_timeout(_do, 20)
         return self
 
     @property
@@ -130,26 +163,30 @@ class PgConn:
         return self._lastrowid
 
     def fetchone(self):
-        return self.cur.fetchone()
+        return self._run_with_timeout(self.cur.fetchone, 20)
 
     def fetchall(self):
-        return self.cur.fetchall()
+        return self._run_with_timeout(self.cur.fetchall, 20)
 
     def commit(self):
-        self.conn.commit()
+        self._run_with_timeout(self.conn.commit, 20)
 
     def rollback(self):
         try:
-            self.conn.rollback()
+            self._run_with_timeout(self.conn.rollback, 10)
         except Exception:
             pass
 
     def close(self):
+        # close 可能阻塞在忙连接上(查询挂起时)，用硬超时避免阻塞锁释放
         try:
-            self.cur.close()
+            self._run_with_timeout(self.cur.close, 5)
         except Exception:
             pass
-        self.conn.close()
+        try:
+            self._run_with_timeout(self.conn.close, 5)
+        except Exception:
+            pass
 
 
 def get_conn():

@@ -363,6 +363,14 @@ def maybe_eval_indices():
 def scheduler_loop():
     while True:
         cycle_ok = True
+        # 确保表存在（幂等；Neon compute 恢复后自动补建）。
+        # 不能依赖模块级 init_db 成功——它可能因 Neon 冷启动失败。
+        try:
+            database.init_db()
+        except Exception as e:
+            print('init_db error:', e)
+            time.sleep(60)
+            continue
         try:
             scan_once()
         except Exception as e:
@@ -887,9 +895,19 @@ def start_scheduler():
         threading.Thread(target=scheduler_loop, daemon=True).start()
 
 
-# 模块级初始化：gunicorn 导入 app 时即建表 + 启动调度线程
-database.init_db()
-start_scheduler()
+# 后台初始化：不阻塞 app 启动。Neon 冷启动时 init_db 可能卡住，若在
+# 模块级同步执行会导致 gunicorn 起不来、Render 部署失败回滚到旧代码。
+# init_db 与 start_scheduler 移到后台线程；scheduler_loop 内每轮也会
+# 幂等重试 init_db，Neon 恢复后自动建表并开始扫描。
+def _bootstrap():
+    try:
+        database.init_db()
+    except Exception as e:
+        print('bootstrap init_db error (scheduler will retry):', e)
+    start_scheduler()
+
+
+threading.Thread(target=_bootstrap, daemon=True).start()
 
 
 def main():
