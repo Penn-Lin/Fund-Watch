@@ -414,8 +414,9 @@ $('#btn-refresh').addEventListener('click', async () => {
   try {
     const r = await api('/api/refresh', { method: 'POST' });
     if (r.fetched < 0) {
-      const stageTxt = { fetching: '正在抓取行情', evaluating: '正在评估规则',
-        notifying: '正在发送通知' }[r.stage] || r.stage || '进行中';
+      const stageTxt = { fetching: '正在抓取行情', db_cleanup: '正在清理历史',
+        http_fetch: '正在抓取行情', inserting: '正在写入数据', evaluating: '正在评估规则',
+        alert_insert: '正在记录提醒', notifying: '正在发送通知' }[r.stage] || r.stage || '进行中';
       toast(`上一轮扫描${stageTxt}，请稍候再刷新`);
     } else {
       toast(`已刷新 ${r.fetched} 只基金，触发 ${r.alerts} 条提醒`);

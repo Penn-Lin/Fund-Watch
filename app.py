@@ -72,52 +72,63 @@ def _scan_once_impl():
     """
     global _scan_stage
     fetched = 0
+    _scan_stage = 'db_cleanup'
     conn = database.get_conn()
-    # 清理 90 天前的历史快照，控制数据量
-    cutoff = (datetime.datetime.now() - datetime.timedelta(days=90)
-              ).strftime('%Y-%m-%d %H:%M:%S')
-    conn.execute('DELETE FROM nav_history WHERE fetched_at < ?', (cutoff,))
-    conn.commit()
-    funds = conn.execute(
-        'SELECT * FROM funds WHERE enabled=1').fetchall()
-    codes = [f['code'] for f in funds]
-    conn.close()
+    try:
+        # 清理 90 天前的历史快照，控制数据量
+        cutoff = (datetime.datetime.now() - datetime.timedelta(days=90)
+                  ).strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute('DELETE FROM nav_history WHERE fetched_at < ?', (cutoff,))
+        conn.commit()
+        funds = conn.execute(
+            'SELECT * FROM funds WHERE enabled=1').fetchall()
+        codes = [f['code'] for f in funds]
+    finally:
+        conn.close()
+
     if codes:
+        _scan_stage = 'http_fetch'
         try:
             data_list = fund_data.fetch_funds(codes)
         except Exception:
             data_list = []
-        for d in data_list:
-            try:
-                conn = database.get_conn()
-                conn.execute(
-                    'INSERT INTO nav_history (code, nav_date, unit_nav, acc_nav, '
-                    'actual_change, estimated_nav, estimated_change, gztime, fetched_at) '
-                    'VALUES (?,?,?,?,?,?,?,?,?)',
-                    (d['code'], d['nav_date'], d['unit_nav'], d['acc_nav'],
-                     d['actual_change'], d['estimated_nav'], d['estimated_change'],
-                     d['gztime'], rule_engine.now_str()))
-                conn.commit()
-                conn.close()
-                fetched += 1
-            except Exception:
-                pass
+        _scan_stage = 'inserting'
+        conn = database.get_conn()
+        try:
+            for d in data_list:
+                try:
+                    conn.execute(
+                        'INSERT INTO nav_history (code, nav_date, unit_nav, acc_nav, '
+                        'actual_change, estimated_nav, estimated_change, gztime, fetched_at) '
+                        'VALUES (?,?,?,?,?,?,?,?,?)',
+                        (d['code'], d['nav_date'], d['unit_nav'], d['acc_nav'],
+                         d['actual_change'], d['estimated_nav'], d['estimated_change'],
+                         d['gztime'], rule_engine.now_str()))
+                    conn.commit()
+                    fetched += 1
+                except Exception:
+                    conn.rollback()
+        finally:
+            conn.close()
 
     _scan_stage = 'evaluating'
     alerts = rule_engine.evaluate_all()
+    _scan_stage = 'alert_insert'
     pending = []
-    for a in alerts:
-        conn = database.get_conn()
-        cur = conn.execute(
-            'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
-            'current_change, trigger_time, message, notify_status) '
-            'VALUES (?,?,?,?,?,?,?,?,?)',
-            (a['code'], a['name'], a['rule_type'], a['direction'], a['kind'],
-             a['current_change'], rule_engine.now_str(), a['message'], 'pending'))
-        aid = cur.lastrowid
-        conn.commit()
+    conn = database.get_conn()
+    try:
+        for a in alerts:
+            cur = conn.execute(
+                'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
+                'current_change, trigger_time, message, notify_status) '
+                'VALUES (?,?,?,?,?,?,?,?,?)',
+                (a['code'], a['name'], a['rule_type'], a['direction'], a['kind'],
+                 a['current_change'], rule_engine.now_str(), a['message'], 'pending'))
+            aid = cur.lastrowid
+            conn.commit()
+            pending.append((aid, a))
+    finally:
         conn.close()
-        pending.append((aid, a))
     return fetched, pending
 
 
