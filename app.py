@@ -881,6 +881,26 @@ def api_push_status():
     return jsonify({'count': len(subs)})
 
 
+@app.route('/api/version')
+def api_version():
+    """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
+    return jsonify({'version': '3.1', 'commit': '649b885-hardtimeout'})
+
+
+@app.route('/api/db_diag')
+def api_db_diag():
+    """数据库连接诊断：返回 get_conn + 查询的详细错误（不吞异常）"""
+    import traceback
+    try:
+        conn = database.get_conn()
+        row = conn.execute('SELECT 1 AS ok').fetchone()
+        conn.close()
+        return jsonify({'ok': True, 'result': dict(row) if row else None})
+    except Exception as e:
+        return jsonify({'ok': False, 'type': type(e).__name__,
+                        'error': str(e), 'trace': traceback.format_exc()})
+
+
 _scheduler_started = False
 _scheduler_lock = threading.Lock()
 
