@@ -647,12 +647,114 @@ $('#btn-test-notify').addEventListener('click', async () => {
     const b = $('#btn-test-notify');
     b.textContent = '发送中…'; b.disabled = true;
     const r = await api('/api/test_notify', { method: 'POST' });
-    const detail = Object.entries(r.channels || {}).map(([k, v]) => `${k}:${v ? '成功' : '失败'}`).join('，');
+    let detail = Object.entries(r.channels || {})
+      .filter(([k]) => !k.startsWith('_'))
+      .map(([k, v]) => `${k}:${v ? '成功' : '失败'}`).join('，');
+    if (r.webpush_detail) {
+      detail += `（推送${r.webpush_detail.sent}台${r.webpush_detail.failed ? '·失败' + r.webpush_detail.failed : ''}）`;
+    }
     toast(r.ok ? '测试成功：' + detail : '发送失败：' + detail);
   } catch (e) { toast(e.message); }
   finally {
     $('#btn-test-notify').textContent = '发送测试提醒';
     $('#btn-test-notify').disabled = false;
+  }
+});
+
+/* ---------------- 浏览器推送（Web Push） ---------------- */
+function urlB64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+async function subscribePush() {
+  const reg = await navigator.serviceWorker.ready;
+  const r = await api('/api/vapid_public_key');
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlB64ToUint8Array(r.public_key),
+  });
+  await api('/api/subscribe', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subscription: sub }),
+  });
+  return sub;
+}
+
+async function unsubscribePush() {
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  if (!sub) return;
+  const endpoint = sub.endpoint;
+  await sub.unsubscribe();
+  await api('/api/unsubscribe', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint }),
+  });
+}
+
+async function initPush() {
+  const toggle = $('#cf-push');
+  const badge = $('#push-badge');
+  const status = $('#push-status');
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    toggle.disabled = true;
+    status.textContent = '当前浏览器不支持 Web Push';
+    return;
+  }
+  try {
+    await navigator.serviceWorker.register('/static/sw.js');
+  } catch (e) {
+    status.textContent = 'Service Worker 注册失败：' + e.message;
+    return;
+  }
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  if (sub) {
+    toggle.checked = true;
+    badge.textContent = '已订阅';
+    badge.classList.add('on');
+    status.textContent = '本设备已开启推送，网页关闭也能收到通知';
+  }
+}
+
+$('#cf-push').addEventListener('change', async (e) => {
+  const toggle = e.target;
+  const badge = $('#push-badge');
+  const status = $('#push-status');
+  toggle.disabled = true;
+  try {
+    if (toggle.checked) {
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') {
+        toggle.checked = false;
+        status.textContent = '通知权限被拒绝，请在浏览器设置中允许通知';
+        toast('通知权限被拒绝');
+        return;
+      }
+      await subscribePush();
+      badge.textContent = '已订阅';
+      badge.classList.add('on');
+      status.textContent = '本设备已开启推送，网页关闭也能收到通知';
+      toast('推送已开启');
+    } else {
+      await unsubscribePush();
+      badge.textContent = '未开启';
+      badge.classList.remove('on');
+      status.textContent = '点开关开启系统通知推送';
+      toast('推送已关闭');
+    }
+  } catch (err) {
+    toast('推送操作失败：' + err.message);
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    toggle.checked = !!sub;
+  } finally {
+    toggle.disabled = false;
   }
 });
 
@@ -667,6 +769,7 @@ function esc(s) {
 loadFunds();
 loadSummary();
 loadIndices();
+initPush();
 setInterval(loadFunds, 60000);
 setInterval(loadSummary, 60000);
 setInterval(loadIndices, 60000);   // 指数 60 秒刷新（后端有 60s 缓存，不会打接口）

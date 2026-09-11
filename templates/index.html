@@ -4,6 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#e0342f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="基金监控">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
 <title>基金涨跌监控</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -101,6 +107,19 @@
 
     <!-- ===== 通知设置 ===== -->
     <section id="tab-notify" class="tab-panel">
+      <div class="card">
+        <div class="card-head">
+          <h2>浏览器推送</h2>
+          <span class="card-badge" id="push-badge">未开启</span>
+        </div>
+        <p class="hint">开启后触发预警时浏览器弹系统通知，网页没开也能收到。Android Chrome、桌面 Chrome/Edge 原生支持；可多设备同时订阅。</p>
+        <div class="form-row">
+          <span class="form-label">推送通知</span>
+          <label class="switch"><input id="cf-push" type="checkbox"><i></i></label>
+        </div>
+        <p class="hint" id="push-status">点开关开启系统通知推送</p>
+      </div>
+
       <div class="card">
         <div class="card-head"><h2>微信推送</h2></div>
         <p class="hint">Server酱 SendKey 见 sct.ftqq.com；PushPlus Token 见 pushplus.plus。填一个即可。</p>

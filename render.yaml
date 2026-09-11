@@ -12,3 +12,9 @@ services:
         value: Asia/Shanghai
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: VAPID_PRIVATE_KEY   # Web Push 私钥（PEM），不配则自动生成存 DB
+        sync: false
+      - key: VAPID_PUBLIC_KEY    # Web Push 公钥，与私钥配对
+        sync: false
+      - key: VAPID_SUBJECT       # 推送主体：mailto:你的邮箱 或 https://你的域名
+        sync: false

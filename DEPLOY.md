@@ -63,6 +63,34 @@ Render 免费实例 15 分钟无访问会休眠，用免费 cron 唤醒：
 打开公网页面 → 「规则设置」配置阈值 → 「通知设置」填 Server酱/PushPlus/邮箱
 → 点「发送测试提醒」验证。配置存在 Neon，实例重启不丢。
 
+## Web Push 浏览器推送（推荐）
+
+开启后基金触发预警时浏览器弹**系统级通知**，网页没开也能收到——这是接近原生 App 的推送体验。
+本地开发无需任何配置：首次访问自动生成 VAPID 密钥并存入数据库。
+
+### 生产环境固定密钥（推荐）
+
+Render 免费实例磁盘不持久，但自动生成的密钥存在 DB config（Neon）里，跨重启仍稳定。
+若希望多实例统一或便于迁移，用环境变量固定：
+
+1. 在本地 venv 生成密钥对：
+
+   ```bash
+   python -c "import vapid; p,k=vapid._generate_keys(); print('PRIVATE:'); print(p); print('PUBLIC:'); print(k)"
+   ```
+
+2. Render → 你的 Web Service → Environment → 添加：
+   - `VAPID_PRIVATE_KEY` = PRIVATE 输出（PEM，含 BEGIN/END 行）
+   - `VAPID_PUBLIC_KEY` = PUBLIC 输出（base64url 或 PEM 均可）
+   - `VAPID_SUBJECT` = `mailto:你的邮箱` 或 `https://你的域名.onrender.com`
+
+> 不配环境变量也能用——代码会在 Neon 里自动生成并复用一份。
+
+### 订阅推送
+
+手机/电脑浏览器打开公网地址 → 「通知」页 → 「浏览器推送」开关打开 → 允许通知权限。
+可多设备同时订阅，每台设备独立登记。把页面「添加到主屏幕/桌面」后即为 PWA，有图标可离线启动。
+
 ## 注意事项
 
 - 东财接口从海外服务器访问通常没问题，如遇风控可在 Neon 同区域多试几次。

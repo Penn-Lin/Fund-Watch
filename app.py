@@ -776,6 +776,50 @@ def api_test_notify():
     return jsonify(result)
 
 
+# ------------------------- Web Push 订阅 -------------------------
+
+@app.route('/api/vapid_public_key')
+def api_vapid_public_key():
+    """返回 VAPID 公钥（base64url raw），前端拿它作为 applicationServerKey 订阅"""
+    import vapid
+    _, pub = vapid.get_vapid_keys()
+    return jsonify({'public_key': pub})
+
+
+@app.route('/api/subscribe', methods=['POST'])
+def api_subscribe():
+    """接收前端 PushSubscription，存 DB（按 endpoint 去重）"""
+    data = request.get_json(silent=True) or {}
+    sub = data.get('subscription') or {}
+    endpoint = sub.get('endpoint', '')
+    keys = sub.get('keys') or {}
+    p256dh = keys.get('p256dh', '')
+    auth = keys.get('auth', '')
+    if not endpoint:
+        return jsonify({'error': '缺少 endpoint'}), 400
+    database.save_sub(endpoint, p256dh, auth)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/unsubscribe', methods=['POST'])
+def api_unsubscribe():
+    """删除订阅（前端关闭推送权限时调用）"""
+    data = request.get_json(silent=True) or {}
+    endpoint = (data.get('endpoint') or '').strip()
+    if not endpoint:
+        return jsonify({'error': '缺少 endpoint'}), 400
+    database.del_sub(endpoint)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/push_status')
+def api_push_status():
+    """返回当前 push 订阅数量，前端用来显示是否已订阅"""
+    import database
+    subs = database.get_subs()
+    return jsonify({'count': len(subs)})
+
+
 _scheduler_started = False
 _scheduler_lock = threading.Lock()
 

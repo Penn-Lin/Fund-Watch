@@ -28,7 +28,9 @@ class PgConn:
     def __init__(self, dsn):
         import psycopg2
         import psycopg2.extras
-        self.conn = psycopg2.connect(dsn)
+        # connect_timeout=10：Neon 免费层会自动暂停，无超时会导致 connect hang 死、
+        # scheduler 线程卡在持锁状态，之后所有 /api/refresh 都拿不到锁返回 -1
+        self.conn = psycopg2.connect(dsn, connect_timeout=10)
         self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         self._lastrowid = None
 
@@ -135,6 +137,13 @@ _SQLITE_DDL = [
         cfg_key TEXT PRIMARY KEY,
         value TEXT
     )''',
+    '''CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        endpoint TEXT UNIQUE NOT NULL,
+        p256dh TEXT,
+        auth TEXT,
+        created_at TEXT
+    )''',
 ]
 
 _PG_DDL = [s.replace('INTEGER PRIMARY KEY AUTOINCREMENT',
@@ -176,5 +185,44 @@ def save_config(cfg):
             "ON CONFLICT (cfg_key) DO UPDATE SET value = EXCLUDED.value", (val,))
     else:
         conn.execute("INSERT OR REPLACE INTO config (cfg_key, value) VALUES ('app', ?)", (val,))
+    conn.commit()
+    conn.close()
+
+
+# ------------------------- Push 订阅管理 -------------------------
+
+def get_subs():
+    """返回所有 push 订阅记录（list of dict）"""
+    conn = get_conn()
+    rows = conn.execute(
+        'SELECT * FROM push_subscriptions ORDER BY id').fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def save_sub(endpoint, p256dh, auth):
+    """插入或更新一条 push 订阅（按 endpoint 去重）"""
+    import datetime
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_conn()
+    if USE_PG:
+        conn.execute(
+            "INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at) "
+            "VALUES (%s,%s,%s,%s) ON CONFLICT (endpoint) DO UPDATE SET "
+            "p256dh=EXCLUDED.p256dh, auth=EXCLUDED.auth",
+            (endpoint, p256dh, auth, now))
+    else:
+        conn.execute(
+            "INSERT OR REPLACE INTO push_subscriptions "
+            "(endpoint, p256dh, auth, created_at) VALUES (?,?,?,?)",
+            (endpoint, p256dh, auth, now))
+    conn.commit()
+    conn.close()
+
+
+def del_sub(endpoint):
+    """按 endpoint 删除一条订阅"""
+    conn = get_conn()
+    conn.execute('DELETE FROM push_subscriptions WHERE endpoint=?', (endpoint,))
     conn.commit()
     conn.close()
