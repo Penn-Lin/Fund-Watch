@@ -28,21 +28,22 @@ class PgConn:
     def __init__(self, dsn):
         import psycopg2
         import psycopg2.extras
-        # connect_timeout=10 + statement_timeout=15s + keepalives：
-        # Neon 免费层 compute 会自动暂停，暂停后连接被代理层接受但查询无限期挂起
-        # （psycopg2 默认无 statement_timeout）。这会导致 scan_once 卡在第一个
-        # DELETE/SELECT 查询、扫描锁被永久占用、所有手动 refresh 返回 -1。
-        # statement_timeout 让查询 15s 后快速失败，scan_once 异常释放锁，scheduler
-        # 得以继续循环（下一轮 Neon 已冷启动完成即可正常）。
+        # connect_timeout=10 + keepalives：Neon 免费层 compute 会自动暂停，
+        # 暂停后连接被代理层接受但查询可能挂起。
+        # 注意：Neon 的 -pooler 端点(PgBouncer)不支持把 statement_timeout 放进
+        # options 启动参数(会报 unsupported startup parameter 导致连接失败)，
+        # 所以改用连接后执行 SET 语句设置——PgBouncer 会跟踪 statement_timeout
+        # 参数，后续查询都受 15s 超时保护，防止 compute 暂停时查询无限期挂起、
+        # scan_once 卡死、扫描锁被永久占用。
         self.conn = psycopg2.connect(
             dsn,
             connect_timeout=10,
-            options='-c statement_timeout=15000',
             keepalives=1, keepalives_idle=30,
             keepalives_interval=10, keepalives_count=3,
         )
         self.cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         self._lastrowid = None
+        self.cur.execute("SET statement_timeout = 15000")
 
     def execute(self, sql, args=()):
         s = sql.replace('?', '%s') if '?' in sql else sql
