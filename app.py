@@ -76,7 +76,7 @@ def _scan_once_impl():
     conn = database.get_conn()
     try:
         # 清理 90 天前的历史快照，控制数据量
-        cutoff = (datetime.datetime.now() - datetime.timedelta(days=90)
+        cutoff = (rule_engine.now() - datetime.timedelta(days=90)
                   ).strftime('%Y-%m-%d %H:%M:%S')
         conn.execute('DELETE FROM nav_history WHERE fetched_at < ?', (cutoff,))
         conn.commit()
@@ -161,7 +161,7 @@ def _dispatch_alerts(pending):
 
 
 def _interval():
-    now = datetime.datetime.now()
+    now = rule_engine.now()
     if rule_engine.is_trading_day(now) and rule_engine.is_market_hours(now):
         return int(load_config().get('scan_interval_seconds', 60))
     return int(load_config().get('off_hours_interval_seconds', 600))
@@ -197,7 +197,7 @@ def _build_summary_message():
     conn.close()
     if not lines:
         return None, 0
-    weekday = '周' + '一二三四五六日'[datetime.date.today().weekday()]
+    weekday = '周' + '一二三四五六日'[rule_engine.now().weekday()]
     msg = '📊 收盘汇总 %s %s\n%s' % (today, weekday, '\n'.join(lines))
     return msg, len(lines)
 
@@ -209,7 +209,7 @@ def maybe_send_summary():
     if not ds.get('enabled'):
         return False
     hhmm = str(ds.get('time') or '20:00')
-    now = datetime.datetime.now()
+    now = rule_engine.now()
     if not rule_engine.is_trading_day(now):
         return False
     try:
@@ -263,7 +263,7 @@ def _build_index_summary_message():
             ix['name'], sign, chg, price_str))
     if not lines:
         return None, 0
-    weekday = '周' + '一二三四五六日'[datetime.date.today().weekday()]
+    weekday = '周' + '一二三四五六日'[rule_engine.now().weekday()]
     msg = '📈 指数收盘汇总 %s %s\n%s' % (
         rule_engine.today_str(), weekday, '\n'.join(lines))
     return msg, len(lines)
@@ -276,7 +276,7 @@ def maybe_send_index_summary():
     if not ds.get('enabled'):
         return False
     hhmm = str(ds.get('time') or '20:00')
-    now = datetime.datetime.now()
+    now = rule_engine.now()
     if not rule_engine.is_trading_day(now):
         return False
     try:
@@ -311,6 +311,73 @@ def maybe_send_index_summary():
     return True
 
 
+def _build_us_index_summary_message():
+    """生成美股指数昨夜收盘汇总消息（secid 以 us 开头，如纳指100），返回 (msg, 条数)"""
+    indices = fund_data.fetch_indices(max_age=120)
+    if not indices:
+        return None, 0
+    lines = []
+    for ix in indices:
+        if not (ix.get('secid') or '').startswith('us'):
+            continue
+        chg = ix.get('change_pct')
+        if chg is None:
+            continue
+        sign = '+' if chg > 0 else ''
+        price = ix.get('price')
+        lines.append('· %s %s%.2f%%，%s' % (
+            ix['name'], sign, chg, ('%.2f' % price) if price else '—'))
+    if not lines:
+        return None, 0
+    weekday = '周' + '一二三四五六日'[rule_engine.now().weekday()]
+    msg = '🌙 美股昨夜收盘 %s %s\n%s' % (
+        rule_engine.today_str(), weekday, '\n'.join(lines))
+    return msg, len(lines)
+
+
+def maybe_send_us_index_summary():
+    """每天到点（默认 08:00）推送美股昨夜收盘汇总，alert_log 去重
+
+    美股(纳指100)交易日与 A股错位、且在北京时间夜间交易，故不做
+    is_trading_day 判断——每天早晨固定推一条昨夜收盘情况，无论涨跌。
+    """
+    cfg = load_config()
+    us = cfg.get('us_index_summary') or {}
+    if not us.get('enabled'):
+        return False
+    hhmm = str(us.get('time') or '08:00')
+    now = rule_engine.now()
+    try:
+        h, m = (int(x) for x in hhmm.split(':'))
+    except Exception:
+        return False
+    if (now.hour, now.minute) < (h, m):
+        return False
+    today = rule_engine.today_str()
+    conn = database.get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM alert_log WHERE kind='us_index_summary' "
+        "AND trigger_time LIKE ?", (today + '%',)).fetchone()
+    conn.close()
+    if row['c'] > 0:
+        return False
+
+    msg, _ = _build_us_index_summary_message()
+    if msg is None:
+        return False
+    result = notifier.send_alert(cfg, '基金监控 · 美股昨夜', msg)
+    conn = database.get_conn()
+    conn.execute(
+        'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
+        'current_change, trigger_time, message, notify_status) '
+        "VALUES ('US_IX_SUMMARY', '美股汇总', 'index', NULL, 'us_index_summary', "
+        'NULL, ?, ?, ?)',
+        (rule_engine.now_str(), msg, 'sent' if result['ok'] else 'failed'))
+    conn.commit()
+    conn.close()
+    return True
+
+
 def maybe_eval_indices():
     """指数涨跌幅超阈值即时推送（每指数每方向每日一次去重）"""
     cfg = load_config()
@@ -326,6 +393,8 @@ def maybe_eval_indices():
     today = rule_engine.today_str()
     sent = 0
     for ix in indices:
+        if (ix.get('secid') or '').startswith('us'):
+            continue  # 美股指数改走早上汇总，不参与盘中实时阈值提醒
         chg = ix.get('change_pct')
         if chg is None:
             continue
@@ -390,6 +459,11 @@ def scheduler_loop():
             maybe_send_index_summary()
         except Exception as e:
             print('index summary error:', e)
+            cycle_ok = False
+        try:
+            maybe_send_us_index_summary()
+        except Exception as e:
+            print('us index summary error:', e)
             cycle_ok = False
         # 失败时快速重试（Neon 冷启动/网络抖动后能自愈），成功时按配置间隔
         try:
@@ -752,7 +826,7 @@ def api_indices():
 
 @app.route('/api/summary')
 def api_summary():
-    today = datetime.date.today().strftime('%Y-%m-%d')
+    today = rule_engine.today_str()
     conn = database.get_conn()
     funds = conn.execute('SELECT * FROM funds WHERE enabled=1').fetchall()
     up = down = flat = 0
@@ -816,6 +890,12 @@ def api_config():
         cfg['index_summary'] = {
             'enabled': bool(idxs.get('enabled')),
             'time': str(idxs.get('time') or '20:00'),
+        }
+    if 'us_index_summary' in data:
+        usix = data['us_index_summary'] or {}
+        cfg['us_index_summary'] = {
+            'enabled': bool(usix.get('enabled')),
+            'time': str(usix.get('time') or '08:00'),
         }
     if 'email' in data:
         cfg['email'] = data['email']

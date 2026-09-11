@@ -39,6 +39,7 @@ const RULE_TEXT = { daily: '当日涨跌', cumulative: '累计节点' };
 const KIND_TEXT = {
   daily: '当日阈值', cum_estimate: '累计估值预警', cum_confirm: '累计净值确认',
   daily_summary: '收盘汇总', index_threshold: '指数阈值', index_summary: '指数汇总',
+  us_index_summary: '美股汇总',
 };
 
 /* ---------------- Tab 切换（底部导航） ---------------- */
@@ -570,7 +571,7 @@ async function loadAlerts() {
         <div class="alert-msg">${esc(a.message || '')}</div>
         <div class="alert-tags">
           <span class="tag">${KIND_TEXT[a.kind] || a.kind}</span>
-          ${a.kind === 'daily_summary' ? '' : `
+          ${['daily_summary', 'index_summary', 'us_index_summary'].includes(a.kind) ? '' : `
           <span class="tag ${cls(a.current_change)}">${pct(a.current_change)}</span>`}
           <span class="tag">${a.notify_status === 'sent' ? '✓ 已推送' : (a.notify_status === 'failed' ? '推送失败' : a.notify_status)}</span>
         </div>
@@ -610,6 +611,9 @@ async function loadConfig() {
   const ixs = cfg.index_summary || {};
   $('#cf-ixs-time').value = ixs.time || '20:00';
   $('#cf-ixs-on').checked = !!ixs.enabled;
+  const usix = cfg.us_index_summary || {};
+  $('#cf-usix-time').value = usix.time || '08:00';
+  $('#cf-usix-on').checked = !!usix.enabled;
 }
 
 $('#btn-save-cfg').addEventListener('click', async () => {
@@ -630,6 +634,10 @@ $('#btn-save-cfg').addEventListener('click', async () => {
       index_summary: {
         enabled: $('#cf-ixs-on').checked,
         time: $('#cf-ixs-time').value || '20:00',
+      },
+      us_index_summary: {
+        enabled: $('#cf-usix-on').checked,
+        time: $('#cf-usix-time').value || '08:00',
       },
       email: {
         smtp_host: $('#cf-host').value.trim(),

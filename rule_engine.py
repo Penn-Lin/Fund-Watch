@@ -3,22 +3,38 @@
 import datetime
 import database
 
+try:
+    from zoneinfo import ZoneInfo
+    _TZ = ZoneInfo('Asia/Shanghai')
+except Exception:
+    _TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def now():
+    """当前北京时间——全系统统一时间基准。
+
+    服务器(Render)为 UTC，若直接用 datetime.now() 会导致 A 股交易时段
+    判断(9:30-15:00)整体错 8 小时、日期切分错位、盘中估值预警与收盘汇总
+    的触发时机不准。所有时间判断与时间戳入库统一走北京时间。
+    """
+    return datetime.datetime.now(_TZ)
+
 
 def now_str():
-    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return now().strftime('%Y-%m-%d %H:%M:%S')
 
 
 def today_str():
-    return datetime.datetime.now().strftime('%Y-%m-%d')
+    return now().strftime('%Y-%m-%d')
 
 
 def is_trading_day(dt=None):
-    dt = dt or datetime.datetime.now()
+    dt = dt or now()
     return dt.weekday() < 5
 
 
 def is_market_hours(dt=None):
-    dt = dt or datetime.datetime.now()
+    dt = dt or now()
     hm = dt.hour * 100 + dt.minute
     return 930 <= hm <= 1500
 
@@ -140,7 +156,6 @@ def evaluate_baseline_reset(code):
     盘前/盘中均可评估，用于手动设置基准后的即时判定。
     """
     conn = database.get_conn()
-    now = datetime.datetime.now()
     tstr = today_str()
     fund = conn.execute(
         'SELECT * FROM funds WHERE code=? AND enabled=1', (code,)).fetchone()
@@ -194,7 +209,7 @@ def evaluate_all():
     """评估所有启用基金的规则，返回需要提醒的 alert 列表"""
     conn = database.get_conn()
     alerts = []
-    now = datetime.datetime.now()
+    now = now()
     tstr = today_str()
     funds = conn.execute('SELECT * FROM funds WHERE enabled=1').fetchall()
     for f in funds:
