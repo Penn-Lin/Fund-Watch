@@ -499,18 +499,30 @@ main { padding: 14px 14px 96px; }
 .alert-pop.up .pop-edge { background: var(--red); }
 .alert-pop.down .pop-edge { background: var(--green); }
 
-.pop-main { flex: 1; min-width: 0; padding: 10px 4px 10px 12px; }
-.pop-head { display: flex; align-items: baseline; gap: 8px; }
-.pop-kind { font-size: 13.5px; font-weight: 700; color: var(--text); }
+.pop-main { flex: 1; min-width: 0; padding: 10px 4px 11px 12px; }
+/* 类型降级为小标签，重点内容放大上色——让"发生了什么"盖过"这是什么类型" */
+.pop-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.pop-kind {
+  font-size: 10.5px; font-weight: 600; color: var(--text-3);
+  background: #f4f5f7; padding: 2px 7px; border-radius: 99px; letter-spacing: .3px;
+}
 .pop-time {
-  font-size: 11px; color: var(--text-3); margin-left: auto;
+  font-size: 10.5px; color: var(--text-3); margin-left: auto;
   font-family: var(--mono); font-variant-numeric: tabular-nums;
 }
-.pop-text {
-  font-size: 12px; color: var(--text-2); margin-top: 3px; line-height: 1.45;
+.pop-lead {
+  font-size: 16px; font-weight: 700; color: var(--text); line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+.pop-lead b.up { color: var(--red); }
+.pop-lead b.down { color: var(--green); }
+.pop-sub {
+  font-size: 11.5px; color: var(--text-2); margin-top: 3px; line-height: 1.45;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.pop-sub b.up { color: var(--red); }
+.pop-sub b.down { color: var(--green); }
 .pop-close {
   width: 40px; flex-shrink: 0; border: none; background: none;
   color: var(--text-3); font-size: 19px; line-height: 1; cursor: pointer;
@@ -570,13 +582,21 @@ main { padding: 14px 14px 96px; }
 .ad-hero-big.down { color: var(--green); }
 .ad-hero-big.flat { color: var(--text-2); }
 
-.ad-stats { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-.ad-pill {
-  font-size: 11.5px; padding: 3px 10px; border-radius: 99px;
-  background: #f4f5f7; color: var(--text-2); font-variant-numeric: tabular-nums;
+/* 详情首屏直接给重点：大字结论，而不是一排小胶囊；抽屉标题同步让位 */
+#ad-title { font-size: 13px; font-weight: 600; color: var(--text-2); }
+.ad-stats {
+  padding: 14px 16px; background: #f8f9fb; border-radius: 12px; margin-bottom: 12px;
 }
-.ad-pill.up { background: var(--red-bg); color: var(--red); }
-.ad-pill.down { background: var(--green-bg); color: var(--green); }
+.ad-lead {
+  font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.ad-lead b.up { color: var(--red); }
+.ad-lead b.down { color: var(--green); }
+.ad-meta {
+  font-size: 11.5px; color: var(--text-3); margin-top: 6px;
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+}
 
 .ad-sec {
   font-size: 11px; font-weight: 600; color: var(--text-3);
@@ -587,15 +607,24 @@ main { padding: 14px 14px 96px; }
   white-space: pre-wrap; word-break: break-word; margin-top: 12px;
 }
 
-/* ===================== 记录条目：摘要化 + 可点击 ===================== */
+/* ===================== 记录条目：类型小标签 + 重点大字 ===================== */
 .alert-item { cursor: pointer; transition: transform .12s; }
 .alert-item:active { transform: scale(.99); }
-.alert-brief {
-  font-size: 12.5px; color: var(--text-2); margin-top: 6px; line-height: 1.5;
+.alert-kind {
+  font-size: 10.5px; font-weight: 600; color: var(--text-3);
+  background: #f4f5f7; padding: 2px 7px; border-radius: 99px; letter-spacing: .3px;
 }
-.alert-brief b { font-weight: 700; font-variant-numeric: tabular-nums; }
-.alert-brief b.up { color: var(--red); }
-.alert-brief b.down { color: var(--green); }
+.alert-lead {
+  font-size: 15px; font-weight: 700; color: var(--text); line-height: 1.3;
+  margin-top: 6px; font-variant-numeric: tabular-nums;
+}
+.alert-lead b.up { color: var(--red); }
+.alert-lead b.down { color: var(--green); }
+.alert-sub {
+  font-size: 11.5px; color: var(--text-2); margin-top: 3px; line-height: 1.5;
+}
+.alert-sub b.up { color: var(--red); }
+.alert-sub b.down { color: var(--green); }
 .alert-more {
   display: block; font-size: 11px; color: var(--primary);
   margin-top: 7px; font-weight: 600;

@@ -563,20 +563,23 @@ async function loadAlerts() {
       box.innerHTML = '<div class="empty">暂无监控记录<br>基金触发预警后会出现在这里</div>';
       return;
     }
-    // 摘要化：不再把整段消息铺成灰色小字，只给一句抓得住重点的话，点开看结构化详情
-    box.innerHTML = alerts.map((a) => `
+    // 类型做成小标签，重点内容放大上色——层级与原设计相反，让人先看到"发生了什么"
+    box.innerHTML = alerts.map((a) => {
+      const { lead, sub } = alertParts(a);
+      return `
       <div class="alert-item ${a.direction === 'up' ? 'up' : (a.direction === 'down' ? 'down' : '')}" data-alert-id="${a.id}">
         <div class="alert-top">
-          <span class="alert-title">${esc(KIND_TEXT[a.kind] || a.kind)}</span>
+          <span class="alert-kind">${esc(KIND_TEXT[a.kind] || a.kind)}</span>
           <span class="alert-time">${(a.trigger_time || '').slice(5, 16)}</span>
         </div>
-        <div class="alert-brief">${alertBriefHTML(a)}</div>
+        <div class="alert-lead">${lead}</div>
+        <div class="alert-sub">${sub}</div>
         <div class="alert-tags">
-          ${showAlertName(a) ? `<span class="tag">${esc(a.name)}</span>` : ''}
           <span class="tag">${a.notify_status === 'sent' ? '✓ 已推送' : (a.notify_status === 'failed' ? '推送失败' : a.notify_status)}</span>
         </div>
         <span class="alert-more">查看详情 →</span>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   } catch (e) {
     $('#alert-list').innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`;
   }
@@ -879,13 +882,13 @@ function parseAlert(a) {
   return { type: 'text', header: lines[0] || '' };
 }
 
-// 汇总类条目的 name 是占位符（SUMMARY / IX_SUMMARY …），不作为标签展示
-function showAlertName(a) {
-  return a.name && !/^(SUMMARY|IX_SUMMARY|US_IX_SUMMARY)$/.test(a.name);
-}
-
-/** 一句话摘要：直接给结论（几跌几涨、谁最深），而不是让人在十几行数字里自己找 */
-function alertBriefHTML(a) {
+/**
+ * 拆成两段用于分层排版：
+ *   lead = 放大上色的重点（几跌几涨 / 核心涨跌幅）
+ *   sub  = 补充说明（谁最深最强、阈值多少）
+ * 类型名不在这里出现——由调用方渲染成小标签，避免"类型"盖过"内容"。
+ */
+function alertParts(a) {
   const p = parseAlert(a);
   if (p.type === 'list') {
     const up = p.rows.filter((r) => r.pct > 0).length;
@@ -893,12 +896,29 @@ function alertBriefHTML(a) {
     const sorted = p.rows.slice().sort((x, y) => x.pct - y.pct);
     const worst = sorted[0];
     const best = sorted[sorted.length - 1];
-    let s = `<b class="down">${down}</b> 跌 · <b class="up">${up}</b> 涨`;
-    if (worst.pct < 0) s += ` · 最深 ${esc(worst.name)} <b class="down">${pct(worst.pct)}</b>`;
-    if (best.pct > 0) s += ` · 最强 ${esc(best.name)} <b class="up">${pct(best.pct)}</b>`;
-    return s;
+    const lead = `<b class="down">${down}</b> 跌 · <b class="up">${up}</b> 涨`;
+    let sub = `共 ${p.rows.length} 项`;
+    if (worst.pct < 0) sub += ` · 最深 ${esc(worst.name)} <b class="down">${pct(worst.pct)}</b>`;
+    if (best.pct > 0) sub += ` · 最强 ${esc(best.name)} <b class="up">${pct(best.pct)}</b>`;
+    return { lead, sub };
   }
-  return esc(p.header);
+
+  // 单条提醒：核心数字提到 lead，其余压成一行说明
+  const raw = String(a.message || '').split('\n')[0];
+  let n = a.current_change;
+  if (n === null || n === undefined) {
+    const m = raw.match(/([+-]?\d+\.\d+)%/);
+    n = m ? parseFloat(m[1]) : null;
+  }
+  const lead = n === null ? esc(p.header) : `<b class="${cls(n)}">${pct(n)}</b>`;
+
+  let sub = a.name || '';
+  const thr = raw.match(/达到阈值\s*([\d.]+)%/);
+  const tail = raw.match(/触发节点[^，]*/);
+  if (thr) sub += ` · 达到阈值 ${thr[1]}%`;
+  else if (tail) sub += ` · ${tail[0]}`;
+  else if (!sub) sub = esc(raw);
+  return { lead, sub };
 }
 
 /** 详情：汇总类渲染成带色带的结构化列表；单条渲染成大数字 + 原文 */
@@ -915,11 +935,8 @@ function renderAlertDetail(a) {
     const sorted = p.rows.slice().sort((x, y) => x.pct - y.pct);
     return `
       <div class="ad-stats">
-        <span class="ad-pill down">${down} 跌</span>
-        <span class="ad-pill up">${up} 涨</span>
-        ${flat ? `<span class="ad-pill">${flat} 平</span>` : ''}
-        <span class="ad-pill">共 ${p.rows.length} 项</span>
-        <span class="ad-pill">${esc(time)}</span>
+        <div class="ad-lead"><b class="down">${down}</b> 跌 · <b class="up">${up}</b> 涨</div>
+        <div class="ad-meta">共 ${p.rows.length} 项${flat ? ` · ${flat} 平` : ''} · ${esc(time)}</div>
       </div>
       <p class="ad-sec">按涨跌幅排序</p>
       <div class="q-list">
@@ -990,6 +1007,7 @@ function showAlertPop(a, delay) {
   el.setAttribute('role', 'button');
   el.setAttribute('tabindex', '0');
   el.style.animationDelay = (delay || 0) + 'ms';
+  const { lead, sub } = alertParts(a);
   el.innerHTML = `
     <i class="pop-edge"></i>
     <div class="pop-main">
@@ -997,7 +1015,8 @@ function showAlertPop(a, delay) {
         <span class="pop-kind">${esc(KIND_TEXT[a.kind] || a.kind || '提醒')}</span>
         <span class="pop-time">${(a.trigger_time || '').slice(11, 16)}</span>
       </div>
-      <div class="pop-text">${alertBriefHTML(a)}</div>
+      <div class="pop-lead">${lead}</div>
+      <div class="pop-sub">${sub}</div>
     </div>
     <button class="pop-close" aria-label="关闭提醒">×</button>`;
   el.addEventListener('click', (ev) => {
