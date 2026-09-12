@@ -2,8 +2,29 @@
 """通知：Server酱 / PushPlus（微信推送）+ 邮件 + Web Push（浏览器系统推送）"""
 import json
 import smtplib
+import time
+from concurrent.futures import ThreadPoolExecutor
 from email.mime.text import MIMEText
 import requests
+
+# SMTP 单次 socket 操作超时。Render 免费层封禁 25/465/587，connect 会被防火墙
+# 静默丢包（不返回 RST），只能等超时，所以这个值直接决定「测试推送」卡多久。
+SMTP_TIMEOUT = 10
+
+# SMTP 熔断：Render 免费层封了 25/465/587，connect 被静默丢包，每次都要等满
+# SMTP_TIMEOUT 才失败。自动提醒是按条串行发送的，如果不熔断，第 N 条的浏览器推送
+# 会被前 N-1 条的邮件等待一层层往后推。一旦确认是网络层拒绝，冷却期内直接跳过。
+EMAIL_BLOCK_COOLDOWN = 1800  # 秒
+_email_block = {'until': 0.0, 'key': ''}
+
+
+def _is_network_block(err_text):
+    """区分「SMTP 被网络层阻断」和「账号/授权码错」——前者才值得熔断"""
+    t = (err_text or '').lower()
+    return any(s in t for s in (
+        'network is unreachable', 'no route to host', 'connection refused',
+        'timed out', 'timeout', 'errno 101', 'errno 110', 'errno 111', 'errno 113',
+    ))
 
 
 def send_serverchan(sendkey, title, content):
@@ -29,9 +50,9 @@ def send_email(ec, title, content):
     to_addrs = ec.get('to_addrs') or []
     msg['To'] = ','.join(to_addrs)
     if ec.get('use_ssl'):
-        server = smtplib.SMTP_SSL(ec['smtp_host'], int(ec.get('smtp_port', 465)), timeout=15)
+        server = smtplib.SMTP_SSL(ec['smtp_host'], int(ec.get('smtp_port', 465)), timeout=SMTP_TIMEOUT)
     else:
-        server = smtplib.SMTP(ec['smtp_host'], int(ec.get('smtp_port', 25)), timeout=15)
+        server = smtplib.SMTP(ec['smtp_host'], int(ec.get('smtp_port', 25)), timeout=SMTP_TIMEOUT)
         server.starttls()
     server.login(ec['username'], ec['password'])
     server.sendmail(from_addr, to_addrs, msg.as_string())
@@ -95,33 +116,22 @@ def send_webpush(subs, title, content):
 
 
 def send_alert(cfg, title, content):
-    """按配置依次尝试各渠道，返回 {'ok': bool, 'channels': {渠道: 是否成功}}
+    """推送各渠道，返回 {'ok': bool, 'channels': {...}, 'timing': {渠道_ms: ms}}
 
-    webpush 不依赖 cfg（订阅存 DB），只要有订阅就推。
+    顺序是关键（曾被这个问题坑过）：
+    - Web Push 走 HTTPS，1~3 秒就能到，必须**排在第一个**；
+    - 邮件走 SMTP，Render 免费层封了 25/465/587，connect 被静默丢包，
+      单次要卡到 SMTP_TIMEOUT 才报错。如果它排前面（旧的顺序），
+      用户点「测试推送」后要等十几秒才收到浏览器推送。
+    - serverchan / pushplus / email 之间用线程并行，互不拖累。
     """
     results = {}
-    sk = (cfg.get('serverchan_sendkey') or '').strip()
-    if sk:
-        try:
-            results['serverchan'] = send_serverchan(sk, title, content)
-        except Exception:
-            results['serverchan'] = False
-    pt = (cfg.get('pushplus_token') or '').strip()
-    if pt:
-        try:
-            results['pushplus'] = send_pushplus(pt, title, content)
-        except Exception:
-            results['pushplus'] = False
-    ec = cfg.get('email') or {}
-    if ec.get('smtp_host') and ec.get('username') and ec.get('to_addrs'):
-        try:
-            results['email'] = send_email(ec, title, content)
-        except Exception as e:
-            results['email'] = False
-            results['email_error'] = str(e)[:200]  # 暴露真实失败原因（授权码错/海外IP被拒等）
+    timing = {}
+    jobs = {}  # 渠道名 -> 无参函数
 
-    # Web Push：从 DB 查所有订阅推送，失效订阅自动清理
+    # ---------- 1) Web Push 先发（最快、且是用户主要依赖的渠道） ----------
     wp_detail = None
+    t0 = time.time()
     try:
         import database
         subs = database.get_subs()
@@ -131,10 +141,58 @@ def send_alert(cfg, title, content):
                 database.del_sub(ep)
             results['webpush'] = wp['sent'] > 0
             wp_detail = wp
-    except Exception:
+    except Exception as e:
         results['webpush'] = False
+        results['webpush_error'] = '%s: %s' % (type(e).__name__, str(e)[:150])
+    timing['webpush_ms'] = int((time.time() - t0) * 1000)
 
-    out = {'ok': any(results.values()), 'channels': results}
+    # ---------- 2) 其余渠道并行 ----------
+    sk = (cfg.get('serverchan_sendkey') or '').strip()
+    if sk:
+        jobs['serverchan'] = lambda: send_serverchan(sk, title, content)
+    pt = (cfg.get('pushplus_token') or '').strip()
+    if pt:
+        jobs['pushplus'] = lambda: send_pushplus(pt, title, content)
+    ec = cfg.get('email') or {}
+    email_key = '%s:%s:%s' % (ec.get('smtp_host'), ec.get('smtp_port'), ec.get('username'))
+    if _email_block['key'] != email_key:
+        # SMTP 配置变了（换服务商/账号）→ 解除熔断，重新给一次机会
+        _email_block['key'] = email_key
+        _email_block['until'] = 0.0
+    if ec.get('smtp_host') and ec.get('username') and ec.get('to_addrs'):
+        if time.time() < _email_block['until']:
+            left = int((_email_block['until'] - time.time()) / 60) + 1
+            results['email'] = False
+            results['email_error'] = ('SMTP 已熔断：连接被网络层阻断（Render 免费层封禁 25/465/587），'
+                                      '约 %d 分钟后才会重试，避免每次都白等 %ds' % (left, SMTP_TIMEOUT))
+            timing['email_ms'] = 0
+        else:
+            jobs['email'] = lambda: send_email(ec, title, content)
+
+    if jobs:
+        started = {}
+        with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+            futs = {}
+            for name, fn in jobs.items():
+                started[name] = time.time()
+                futs[name] = ex.submit(fn)
+            for name, fut in futs.items():
+                try:
+                    results[name] = bool(fut.result(timeout=SMTP_TIMEOUT + 10))
+                except Exception as e:
+                    results[name] = False
+                    # 暴露真实失败原因（授权码错 / 海外 IP 被拒绝 / 端口被封）
+                    results[name + '_error'] = '%s: %s' % (type(e).__name__, str(e)[:180])
+                    if name == 'email' and _is_network_block(str(e)):
+                        _email_block['until'] = time.time() + EMAIL_BLOCK_COOLDOWN
+                timing[name + '_ms'] = int((time.time() - started[name]) * 1000)
+
+    out = {
+        'ok': any(v for k, v in results.items() if not k.endswith('_error')),
+        'channels': results,
+        'timing': timing,
+        'total_ms': sum(v for k, v in timing.items() if k != 'webpush_ms') + timing.get('webpush_ms', 0),
+    }
     if wp_detail:
         out['webpush_detail'] = wp_detail
     return out

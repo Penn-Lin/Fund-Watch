@@ -663,7 +663,7 @@ $('#btn-test-notify').addEventListener('click', async () => {
     b.textContent = '发送中…'; b.disabled = true;
     const r = await api('/api/test_notify', { method: 'POST' });
     let detail = Object.entries(r.channels || {})
-      .filter(([k]) => !k.startsWith('_'))
+      .filter(([k]) => !k.endsWith('_error'))
       .map(([k, v]) => `${k}:${v ? '成功' : '失败'}`).join('，');
     if (r.webpush_detail) {
       detail += `（推送${r.webpush_detail.sent}台${r.webpush_detail.failed ? '·失败' + r.webpush_detail.failed : ''}）`;
@@ -673,6 +673,22 @@ $('#btn-test-notify').addEventListener('click', async () => {
       // 失败原因持久显示在推送卡片上，避免 toast 一闪而过看不清
       $('#push-status').textContent = '上次推送失败：' + wpErr.error;
       console.warn('[push] 测试推送失败明细', r.webpush_detail);
+    }
+    // 分段耗时：直接回答「为什么过了很久才收到」是哪个渠道拖的
+    if (r.timing) {
+      console.info('[push] 各渠道耗时(ms)', r.timing, '合计', r.total_ms);
+      const wpSec = ((r.timing.webpush_ms || 0) / 1000).toFixed(1);
+      const slow = Object.entries(r.timing)
+        .filter(([k, v]) => k !== 'webpush_ms' && v >= 3000)
+        .sort((a, b) => b[1] - a[1])[0];
+      if (slow && !wpErr) {
+        const name = slow[0].replace('_ms', '');
+        const errKey = name + '_error';
+        const why = r.channels && r.channels[errKey] ? `（${String(r.channels[errKey]).slice(0, 60)}）` : '';
+        $('#push-status').textContent =
+          `浏览器推送已在 ${wpSec}s 发出。${name} 渠道耗时 ${(slow[1] / 1000).toFixed(1)}s${why}` +
+          '，是它拖慢了整体返回，但不影响推送到达时间。';
+      }
     }
     toast(r.ok ? '测试成功：' + detail : '发送失败：' + detail);
   } catch (e) { toast(e.message); }
