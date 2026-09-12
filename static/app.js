@@ -751,6 +751,7 @@ $('#cf-push').addEventListener('change', async (e) => {
   toggle.disabled = true;
   try {
     if (toggle.checked) {
+      status.textContent = '⏳ 请在浏览器地址栏下方（或锁图标旁）弹出的通知权限框中点击【允许】';
       const perm = await Notification.requestPermission();
       if (perm !== 'granted') {
         toggle.checked = false;
