@@ -716,6 +716,13 @@ async function initPush() {
   const toggle = $('#cf-push');
   const badge = $('#push-badge');
   const status = $('#push-status');
+  // 预览面板/iframe 内 Web Push 不可靠（订阅会失败或刷新后丢失），
+  // 直接禁用并引导用户用独立浏览器标签页打开。
+  if (window.self !== window.top) {
+    toggle.disabled = true;
+    status.textContent = '当前在预览窗口内，Web Push 不可用。请用 Chrome/Edge 独立打开本页面再开启推送。';
+    return;
+  }
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
     toggle.disabled = true;
     status.textContent = '当前浏览器不支持 Web Push';
@@ -764,10 +771,16 @@ $('#cf-push').addEventListener('change', async (e) => {
       toast('推送已关闭');
     }
   } catch (err) {
-    toast('推送操作失败：' + err.message);
     const reg = await navigator.serviceWorker.ready;
     const sub = await reg.pushManager.getSubscription();
     toggle.checked = !!sub;
+    const msg = (err && err.message) ? err.message : '未知错误';
+    toast('推送操作失败：' + msg);
+    if (!sub) {
+      badge.textContent = '未开启';
+      badge.classList.remove('on');
+      status.textContent = '订阅未成功（' + msg + '）。请确认用 Chrome/Edge 独立标签页打开，且系统通知权限已允许。';
+    }
   } finally {
     toggle.disabled = false;
   }
