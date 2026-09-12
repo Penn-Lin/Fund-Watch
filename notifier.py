@@ -40,41 +40,51 @@ def send_email(ec, title, content):
 
 
 def send_webpush(subs, title, content):
-    """给一组 push 订阅推送系统通知，返回 {'sent': n, 'failed': n, 'gone': [endpoints]}
+    """给一组 push 订阅推送系统通知，
+    返回 {'sent': n, 'failed': n, 'gone': [endpoints], 'errors': [{'endpoint','error'}]}
 
     410 Gone / 404 表示客户端已取消订阅，调用方应删除这些记录。
     """
     import vapid
     from pywebpush import webpush
 
-    priv, _ = vapid.get_vapid_keys()
+    # 注意：必须传 Vapid 对象。pywebpush 只在 key 是 Vapid 实例时直接用，
+    # 否则走 Vapid.from_string() —— 那个函数只认 base64url 密钥，喂 PEM 必然报错。
+    signer = vapid.get_vapid_signer()
     claims = vapid.get_vapid_claims()
     payload = json.dumps({'title': title, 'body': content}, ensure_ascii=False)
     sent = failed = 0
     gone = []
+    errors = []
     for s in subs:
+        ep = s['endpoint']
         sub_info = {
-            'endpoint': s['endpoint'],
+            'endpoint': ep,
             'keys': {'p256dh': s['p256dh'], 'auth': s['auth']},
         }
         try:
             r = webpush(
                 subscription_info=sub_info,
                 data=payload,
-                vapid_private_key=priv,
+                vapid_private_key=signer,
                 vapid_claims=claims,
                 timeout=10,
             )
             if r.status_code in (200, 201):
                 sent += 1
             elif r.status_code in (404, 410):
-                gone.append(s['endpoint'])
+                gone.append(ep)
                 failed += 1
+                errors.append({'endpoint': ep[-24:], 'error': 'HTTP %s (订阅已失效)' % r.status_code})
             else:
                 failed += 1
-        except Exception:
+                errors.append({'endpoint': ep[-24:],
+                               'error': 'HTTP %s %s' % (r.status_code, (r.text or '')[:150])})
+        except Exception as e:
             failed += 1
-    return {'sent': sent, 'failed': failed, 'gone': gone}
+            # 不再静默吞掉：把真实原因带出来，便于在 /api/test_notify 里直接看到
+            errors.append({'endpoint': ep[-24:], 'error': '%s: %s' % (type(e).__name__, str(e)[:180])})
+    return {'sent': sent, 'failed': failed, 'gone': gone, 'errors': errors[:5]}
 
 
 def send_alert(cfg, title, content):

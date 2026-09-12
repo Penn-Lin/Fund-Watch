@@ -100,3 +100,22 @@ def get_vapid_claims():
     """构造 VAPID JWT claims，subject 用部署地址或本地占位"""
     subject = os.environ.get('VAPID_SUBJECT', 'mailto:noreply@fund-monitor.local')
     return {'sub': subject}
+
+
+def get_vapid_signer():
+    """返回 py_vapid.Vapid 实例，供 pywebpush 签名用。
+
+    为什么不能直接把私钥字符串丢给 pywebpush：
+    pywebpush 内部走 `Vapid.from_string()`，该函数只认 **base64url 编码**的
+    密钥（raw 32 字节或 DER），把 PEM 文本（-----BEGIN ...）喂进去会被当成
+    base64url 解码 → `ValueError: Could not deserialize key data`。
+    我们 DB / 环境变量里存的是 PEM，必须先构造对象再传。
+    """
+    from py_vapid import Vapid
+
+    priv, _ = get_vapid_keys()
+    priv = (priv or '').strip()
+    if priv.startswith('-----BEGIN'):
+        return Vapid.from_pem(priv.encode('utf-8'))
+    return Vapid.from_string(priv)
+

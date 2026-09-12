@@ -668,6 +668,12 @@ $('#btn-test-notify').addEventListener('click', async () => {
     if (r.webpush_detail) {
       detail += `（推送${r.webpush_detail.sent}台${r.webpush_detail.failed ? '·失败' + r.webpush_detail.failed : ''}）`;
     }
+    const wpErr = r.webpush_detail && r.webpush_detail.errors && r.webpush_detail.errors[0];
+    if (wpErr) {
+      // 失败原因持久显示在推送卡片上，避免 toast 一闪而过看不清
+      $('#push-status').textContent = '上次推送失败：' + wpErr.error;
+      console.warn('[push] 测试推送失败明细', r.webpush_detail);
+    }
     toast(r.ok ? '测试成功：' + detail : '发送失败：' + detail);
   } catch (e) { toast(e.message); }
   finally {
