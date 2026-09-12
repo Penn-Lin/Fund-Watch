@@ -516,6 +516,8 @@ main { padding: 14px 14px 96px; }
 }
 .pop-lead b.up { color: var(--red); }
 .pop-lead b.down { color: var(--green); }
+/* 标的名与涨跌幅同为重点：名称保持深色，涨跌色由数值承担 */
+.lead-name { color: var(--text); font-weight: 700; }
 .pop-sub {
   font-size: 11.5px; color: var(--text-2); margin-top: 3px; line-height: 1.45;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
@@ -568,8 +570,8 @@ main { padding: 14px 14px 96px; }
   gap: 12px; padding: 14px 16px;
   background: #f8f9fb; border-radius: 12px; margin-bottom: 12px;
 }
-.ad-hero-l { min-width: 0; }
-.ad-hero-title { font-size: 15px; font-weight: 700; line-height: 1.35; }
+.ad-hero-l { min-width: 0; flex: 1; }
+.ad-hero-title { font-size: 17px; font-weight: 700; line-height: 1.3; }
 .ad-hero-sub {
   font-size: 11.5px; color: var(--text-3); margin-top: 4px;
   font-family: var(--mono); font-variant-numeric: tabular-nums;

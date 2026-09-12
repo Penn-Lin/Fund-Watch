@@ -903,21 +903,30 @@ function alertParts(a) {
     return { lead, sub };
   }
 
-  // 单条提醒：核心数字提到 lead，其余压成一行说明
+  // 单条提醒：名称与涨跌幅一起作为重点大字，阈值/节点信息压成说明行
   const raw = String(a.message || '').split('\n')[0];
+  const isCum = String(a.kind || '').startsWith('cum');
   let n = a.current_change;
   if (n === null || n === undefined) {
     const m = raw.match(/([+-]?\d+\.\d+)%/);
     n = m ? parseFloat(m[1]) : null;
   }
-  const lead = n === null ? esc(p.header) : `<b class="${cls(n)}">${pct(n)}</b>`;
+  const nameHTML = a.name ? `<span class="lead-name">${esc(a.name)}</span> ` : '';
+  const lead = n === null
+    ? (nameHTML || esc(p.header))
+    : `${nameHTML}<b class="${cls(n)}">${pct(n)}</b>`;
 
-  let sub = a.name || '';
   const thr = raw.match(/达到阈值\s*([\d.]+)%/);
-  const tail = raw.match(/触发节点[^，]*/);
-  if (thr) sub += ` · 达到阈值 ${thr[1]}%`;
-  else if (tail) sub += ` · ${tail[0]}`;
-  else if (!sub) sub = esc(raw);
+  let sub;
+  if (thr) {
+    sub = `${isCum ? '累计' : '当日'}涨跌达阈值 ${thr[1]}%`;
+  } else if (isCum) {
+    sub = raw.indexOf('估值预警') >= 0
+      ? '累计估值预警 · 收盘净值确认后定基'
+      : '累计已达节点 · 基准重置为当前净值';
+  } else {
+    sub = esc(raw);
+  }
   return { lead, sub };
 }
 
