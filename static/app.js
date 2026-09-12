@@ -50,7 +50,7 @@ $$('.tab').forEach((t) => {
     t.classList.add('active');
     $('#tab-' + t.dataset.tab).classList.add('active');
     window.scrollTo({ top: 0 });
-    if (t.dataset.tab === 'alerts') loadAlerts();
+    if (t.dataset.tab === 'alerts') { loadAlerts(); setUnread(0); }
     if (t.dataset.tab === 'rules') loadRules();
     if (t.dataset.tab === 'notify') loadConfig();
   });
@@ -557,24 +557,25 @@ async function loadAlerts() {
         `<button class="chip${f.code === alertCode ? ' active' : ''}" data-code="${f.code}">${esc(f.name || f.code)}</button>`)).join('');
     row.innerHTML = chips;
 
+    _alertsCache = alerts;
     const box = $('#alert-list');
     if (!alerts.length) {
       box.innerHTML = '<div class="empty">暂无监控记录<br>基金触发预警后会出现在这里</div>';
       return;
     }
+    // 摘要化：不再把整段消息铺成灰色小字，只给一句抓得住重点的话，点开看结构化详情
     box.innerHTML = alerts.map((a) => `
-      <div class="alert-item ${a.direction === 'up' ? 'up' : (a.direction === 'down' ? 'down' : '')}">
+      <div class="alert-item ${a.direction === 'up' ? 'up' : (a.direction === 'down' ? 'down' : '')}" data-alert-id="${a.id}">
         <div class="alert-top">
-          <span class="alert-title">${esc(a.name || '')} <span class="fr-code">${a.code}</span></span>
+          <span class="alert-title">${esc(KIND_TEXT[a.kind] || a.kind)}</span>
           <span class="alert-time">${(a.trigger_time || '').slice(5, 16)}</span>
         </div>
-        <div class="alert-msg">${esc(a.message || '')}</div>
+        <div class="alert-brief">${alertBriefHTML(a)}</div>
         <div class="alert-tags">
-          <span class="tag">${KIND_TEXT[a.kind] || a.kind}</span>
-          ${['daily_summary', 'index_summary', 'us_index_summary'].includes(a.kind) ? '' : `
-          <span class="tag ${cls(a.current_change)}">${pct(a.current_change)}</span>`}
+          ${showAlertName(a) ? `<span class="tag">${esc(a.name)}</span>` : ''}
           <span class="tag">${a.notify_status === 'sent' ? '✓ 已推送' : (a.notify_status === 'failed' ? '推送失败' : a.notify_status)}</span>
         </div>
+        <span class="alert-more">查看详情 →</span>
       </div>`).join('');
   } catch (e) {
     $('#alert-list').innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`;
@@ -855,6 +856,198 @@ $('#cf-push').addEventListener('change', async (e) => {
   }
 });
 
+/* ---------------- 提醒：结构化解析 ---------------- */
+let _alertsCache = [];
+
+// 汇总类消息的数据行长这样：
+//   · 上证指数 -1.18%，3888.11
+//   · 易方达瑞享混合E(001438) +0.58%，净值 9.6893（2026-09-11）
+const SUMMARY_KINDS = ['daily_summary', 'index_summary', 'us_index_summary'];
+
+function parseSummaryLine(line) {
+  const m = String(line).match(/^·\s*(.+?)\s*([+-]?\d+(?:\.\d+)?)%，\s*(.*)$/);
+  if (!m) return null;
+  return { name: m[1].trim(), pct: parseFloat(m[2]), extra: (m[3] || '').trim() };
+}
+
+function parseAlert(a) {
+  const lines = String(a.message || '').split('\n').filter((s) => s.trim());
+  if (SUMMARY_KINDS.includes(a.kind)) {
+    const rows = lines.slice(1).map(parseSummaryLine).filter(Boolean);
+    if (rows.length) return { type: 'list', header: lines[0] || '', rows };
+  }
+  return { type: 'text', header: lines[0] || '' };
+}
+
+// 汇总类条目的 name 是占位符（SUMMARY / IX_SUMMARY …），不作为标签展示
+function showAlertName(a) {
+  return a.name && !/^(SUMMARY|IX_SUMMARY|US_IX_SUMMARY)$/.test(a.name);
+}
+
+/** 一句话摘要：直接给结论（几跌几涨、谁最深），而不是让人在十几行数字里自己找 */
+function alertBriefHTML(a) {
+  const p = parseAlert(a);
+  if (p.type === 'list') {
+    const up = p.rows.filter((r) => r.pct > 0).length;
+    const down = p.rows.filter((r) => r.pct < 0).length;
+    const sorted = p.rows.slice().sort((x, y) => x.pct - y.pct);
+    const worst = sorted[0];
+    const best = sorted[sorted.length - 1];
+    let s = `<b class="down">${down}</b> 跌 · <b class="up">${up}</b> 涨`;
+    if (worst.pct < 0) s += ` · 最深 ${esc(worst.name)} <b class="down">${pct(worst.pct)}</b>`;
+    if (best.pct > 0) s += ` · 最强 ${esc(best.name)} <b class="up">${pct(best.pct)}</b>`;
+    return s;
+  }
+  return esc(p.header);
+}
+
+/** 详情：汇总类渲染成带色带的结构化列表；单条渲染成大数字 + 原文 */
+function renderAlertDetail(a) {
+  const p = parseAlert(a);
+  const time = (a.trigger_time || '').slice(0, 16);
+
+  if (p.type === 'list') {
+    const up = p.rows.filter((r) => r.pct > 0).length;
+    const down = p.rows.filter((r) => r.pct < 0).length;
+    const flat = p.rows.length - up - down;
+    // 色带以 3% 为满格基准；当天若波动更大则按最大值归一，保证条与条之间可比
+    const scale = Math.max(3, ...p.rows.map((r) => Math.abs(r.pct)));
+    const sorted = p.rows.slice().sort((x, y) => x.pct - y.pct);
+    return `
+      <div class="ad-stats">
+        <span class="ad-pill down">${down} 跌</span>
+        <span class="ad-pill up">${up} 涨</span>
+        ${flat ? `<span class="ad-pill">${flat} 平</span>` : ''}
+        <span class="ad-pill">共 ${p.rows.length} 项</span>
+        <span class="ad-pill">${esc(time)}</span>
+      </div>
+      <p class="ad-sec">按涨跌幅排序</p>
+      <div class="q-list">
+        ${sorted.map((r) => `
+          <div class="q-row">
+            <div>
+              <div class="q-name">${esc(r.name)}</div>
+              <div class="q-track"><i class="q-fill ${cls(r.pct)}" style="width:${Math.min(Math.abs(r.pct) / scale * 100, 100).toFixed(1)}%"></i></div>
+            </div>
+            <div class="q-pct ${cls(r.pct)}">${pct(r.pct)}</div>
+            <div class="q-val">${esc(r.extra)}</div>
+          </div>`).join('')}
+      </div>`;
+  }
+
+  return `
+    <div class="ad-hero">
+      <div class="ad-hero-l">
+        <div class="ad-hero-title">${esc(a.name || '提醒')}</div>
+        <div class="ad-hero-sub">${esc(a.code || '')} · ${esc(time)}</div>
+      </div>
+      ${(a.current_change === null || a.current_change === undefined) ? ''
+        : `<div class="ad-hero-big ${cls(a.current_change)}">${pct(a.current_change)}</div>`}
+    </div>
+    <div class="ad-raw">${esc(a.message || '')}</div>`;
+}
+
+function openAlertDetail(a) {
+  $('#ad-title').textContent = KIND_TEXT[a.kind] || '提醒详情';
+  $('#ad-body').innerHTML = renderAlertDetail(a);
+  openSheet('ad');
+}
+
+$('#ad-mask').addEventListener('click', () => closeSheet('ad'));
+
+$('#alert-list').addEventListener('click', (e) => {
+  const item = e.target.closest('.alert-item');
+  if (!item) return;
+  const a = _alertsCache.find((x) => String(x.id) === item.dataset.alertId);
+  if (a) openAlertDetail(a);
+});
+
+/* ---------------- 提醒：顶部浮层 + 新提醒轮询 ---------------- */
+const MAX_POPS = 3;
+const SEEN_KEY = 'fundwatch.lastAlertId';
+
+let _seenAlertId = null;
+try {
+  const v = parseInt(localStorage.getItem(SEEN_KEY), 10);
+  if (!isNaN(v)) _seenAlertId = v;
+} catch (e) { /* 隐私模式下 localStorage 可能不可用，降级为不持久化 */ }
+
+function persistSeen() {
+  try { localStorage.setItem(SEEN_KEY, String(_seenAlertId)); } catch (e) { /* 忽略 */ }
+}
+
+function dismissPop(el) {
+  el.classList.add('leaving');
+  setTimeout(() => el.remove(), 260);
+}
+
+/** 新提醒从顶部滑入；不打断当前操作，点开才展开详情 */
+function showAlertPop(a, delay) {
+  const stack = $('#alert-stack');
+  if (!stack) return;
+  const el = document.createElement('div');
+  el.className = 'alert-pop ' + (a.direction === 'up' || a.direction === 'down' ? a.direction : '');
+  el.setAttribute('role', 'button');
+  el.setAttribute('tabindex', '0');
+  el.style.animationDelay = (delay || 0) + 'ms';
+  el.innerHTML = `
+    <i class="pop-edge"></i>
+    <div class="pop-main">
+      <div class="pop-head">
+        <span class="pop-kind">${esc(KIND_TEXT[a.kind] || a.kind || '提醒')}</span>
+        <span class="pop-time">${(a.trigger_time || '').slice(11, 16)}</span>
+      </div>
+      <div class="pop-text">${alertBriefHTML(a)}</div>
+    </div>
+    <button class="pop-close" aria-label="关闭提醒">×</button>`;
+  el.addEventListener('click', (ev) => {
+    if (ev.target.closest('.pop-close')) { dismissPop(el); return; }
+    openAlertDetail(a);
+    dismissPop(el);
+  });
+  el.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') {
+      ev.preventDefault(); openAlertDetail(a); dismissPop(el);
+    }
+  });
+  stack.appendChild(el);
+  while (stack.children.length > MAX_POPS) stack.removeChild(stack.firstElementChild);
+}
+
+let _unread = 0;
+function setUnread(n) {
+  _unread = n;
+  const dot = $('#alert-dot');
+  if (!dot) return;
+  if (n > 0) { dot.hidden = false; dot.textContent = n > 99 ? '99+' : String(n); }
+  else dot.hidden = true;
+}
+
+/** 轮询新提醒并主动弹出；首次访问只建立水位线，不弹历史（否则一开页面就糊一屏旧消息） */
+async function pollNewAlerts() {
+  let alerts;
+  try { alerts = await api('/api/alerts?limit=20'); } catch (e) { return; }
+  if (!Array.isArray(alerts) || !alerts.length) return;
+  const maxId = Math.max(...alerts.map((a) => a.id || 0));
+  if (!maxId) return;
+
+  if (_seenAlertId === null) {          // 首次：静默记录水位线
+    _seenAlertId = maxId;
+    persistSeen();
+    return;
+  }
+  const fresh = alerts
+    .filter((a) => (a.id || 0) > _seenAlertId)
+    .sort((x, y) => x.id - y.id);
+  _seenAlertId = Math.max(_seenAlertId, maxId);
+  persistSeen();
+  if (!fresh.length) return;
+
+  fresh.slice(-MAX_POPS).forEach((a, i) => showAlertPop(a, i * 130));
+  if ($('#tab-alerts').classList.contains('active')) loadAlerts();
+  else setUnread(Math.min(_unread + fresh.length, 99));
+}
+
 /* ---------------- 工具 ---------------- */
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -867,6 +1060,8 @@ loadFunds();
 loadSummary();
 loadIndices();
 initPush();
+pollNewAlerts();
 setInterval(loadFunds, 60000);
 setInterval(loadSummary, 60000);
 setInterval(loadIndices, 60000);   // 指数 60 秒刷新（后端有 60s 缓存，不会打接口）
+setInterval(pollNewAlerts, 60000); // 每 60 秒检查新提醒，有就从顶部滑入

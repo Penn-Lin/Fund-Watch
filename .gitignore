@@ -6,8 +6,9 @@ config.json
 .workbuddy/
 
 # 测试临时文件（CDP 诊断用，勿提交）
-.chrome-test-profile/
-.chrome-test-profile*/
+.chrome-*/
 .chrome-dom-dump.html
 .chrome-err.log
 .cdp_*.py
+.webpush_repro.py
+ui_shot*.png
