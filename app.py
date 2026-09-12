@@ -966,10 +966,18 @@ def api_unsubscribe():
 
 @app.route('/api/push_status')
 def api_push_status():
-    """返回当前 push 订阅数量，前端用来显示是否已订阅"""
+    """返回当前 push 订阅数量 + 明细（只暴露推送服务域名和端点尾号，不暴露完整令牌）"""
     import database
     subs = database.get_subs()
-    return jsonify({'count': len(subs)})
+    items = []
+    for s in subs:
+        ep = s.get('endpoint') or ''
+        try:
+            host = ep.split('/')[2]
+        except Exception:
+            host = '?'
+        items.append({'host': host, 'tail': ep[-10:], 'created_at': s.get('created_at')})
+    return jsonify({'count': len(subs), 'items': items})
 
 
 @app.route('/api/version')
