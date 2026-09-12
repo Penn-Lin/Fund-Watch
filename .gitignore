@@ -7,6 +7,7 @@ config.json
 
 # 测试临时文件（CDP 诊断用，勿提交）
 .chrome-test-profile/
+.chrome-test-profile*/
 .chrome-dom-dump.html
 .chrome-err.log
-.cdp_test.py
+.cdp_*.py

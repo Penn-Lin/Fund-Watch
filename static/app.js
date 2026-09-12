@@ -686,13 +686,36 @@ function urlB64ToUint8Array(base64String) {
   return arr;
 }
 
-async function subscribePush() {
-  const reg = await navigator.serviceWorker.ready;
+const PUSH_TIMEOUT = 20000;
+
+function withTimeout(p, ms, label) {
+  return Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(
+      () => rej(new Error((label || '操作') + '超时（' + Math.round(ms / 1000) + ' 秒）')), ms)),
+  ]);
+}
+
+async function getSwReg() {
+  // 关键：sw.js 放在 /static/ 下，默认作用域只有 /static/*，
+  // 页面（/）里的 serviceWorker.ready 会永远等待。必须显式指定 scope:'/'，
+  // 后端已为 sw.js 返回 Service-Worker-Allowed: / 放行。
+  await navigator.serviceWorker.register('/static/sw.js', { scope: '/' });
+  return withTimeout(navigator.serviceWorker.ready, PUSH_TIMEOUT, 'Service Worker 就绪');
+}
+
+async function subscribePush(onStatus) {
+  const say = (t) => { if (onStatus) onStatus(t); };
+  say('读取推送密钥…');
   const r = await api('/api/vapid_public_key');
-  const sub = await reg.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: urlB64ToUint8Array(r.public_key),
-  });
+  const reg = await getSwReg();
+  say('正在向浏览器推送服务注册…');
+  const sub = await withTimeout(
+    reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlB64ToUint8Array(r.public_key),
+    }), PUSH_TIMEOUT, '订阅推送服务');
+  say('保存订阅到服务器…');
   await api('/api/subscribe', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ subscription: sub }),
@@ -701,7 +724,7 @@ async function subscribePush() {
 }
 
 async function unsubscribePush() {
-  const reg = await navigator.serviceWorker.ready;
+  const reg = await getSwReg();
   const sub = await reg.pushManager.getSubscription();
   if (!sub) return;
   const endpoint = sub.endpoint;
@@ -728,19 +751,23 @@ async function initPush() {
     status.textContent = '当前浏览器不支持 Web Push';
     return;
   }
+  status.textContent = '正在检查推送状态…';
   try {
-    await navigator.serviceWorker.register('/static/sw.js');
+    const reg = await getSwReg();
+    const sub = await withTimeout(reg.pushManager.getSubscription(), 10000, '读取订阅');
+    if (sub) {
+      toggle.checked = true;
+      badge.textContent = '已订阅';
+      badge.classList.add('on');
+      status.textContent = '本设备已开启推送，网页关闭也能收到通知';
+    } else {
+      status.textContent = Notification.permission === 'granted'
+        ? '通知权限已允许，打开开关即可订阅'
+        : '点开关开启系统通知推送';
+    }
   } catch (e) {
-    status.textContent = 'Service Worker 注册失败：' + e.message;
-    return;
-  }
-  const reg = await navigator.serviceWorker.ready;
-  const sub = await reg.pushManager.getSubscription();
-  if (sub) {
-    toggle.checked = true;
-    badge.textContent = '已订阅';
-    badge.classList.add('on');
-    status.textContent = '本设备已开启推送，网页关闭也能收到通知';
+    console.warn('[push] 初始化失败', e);
+    status.textContent = '推送初始化失败：' + ((e && e.message) || e) + '（可刷新页面重试）';
   }
 }
 
@@ -748,23 +775,36 @@ $('#cf-push').addEventListener('change', async (e) => {
   const toggle = e.target;
   const badge = $('#push-badge');
   const status = $('#push-status');
+  const saying = (t) => { status.textContent = '⏳ ' + t; };
   toggle.disabled = true;
+  console.log('[push] 触发，当前权限：', Notification.permission);
   try {
     if (toggle.checked) {
-      status.textContent = '⏳ 请在浏览器地址栏下方（或锁图标旁）弹出的通知权限框中点击【允许】';
-      const perm = await Notification.requestPermission();
-      if (perm !== 'granted') {
+      if (Notification.permission === 'denied') {
         toggle.checked = false;
-        status.textContent = '通知权限被拒绝，请在浏览器设置中允许通知';
-        toast('通知权限被拒绝');
+        status.textContent = 'Chrome 已禁止本站通知。点地址栏左侧「设置/锁」图标 → 网站设置 → 通知 → 允许，然后刷新本页再打开开关。';
+        toast('浏览器已禁止本站通知');
         return;
       }
-      await subscribePush();
+      if (Notification.permission === 'default') {
+        saying('请在浏览器地址栏下方弹出的通知权限框中点击【允许】');
+        const perm = await Notification.requestPermission();
+        console.log('[push] requestPermission ->', perm);
+        if (perm !== 'granted') {
+          toggle.checked = false;
+          status.textContent = '通知权限被拒绝，请在地址栏左侧「网站设置 → 通知」中改为允许，再刷新本页重试';
+          toast('通知权限被拒绝');
+          return;
+        }
+      }
+      saying('正在订阅推送…');
+      await subscribePush(saying);
       badge.textContent = '已订阅';
       badge.classList.add('on');
       status.textContent = '本设备已开启推送，网页关闭也能收到通知';
       toast('推送已开启');
     } else {
+      saying('正在取消订阅…');
       await unsubscribePush();
       badge.textContent = '未开启';
       badge.classList.remove('on');
@@ -772,15 +812,21 @@ $('#cf-push').addEventListener('change', async (e) => {
       toast('推送已关闭');
     }
   } catch (err) {
-    const reg = await navigator.serviceWorker.ready;
-    const sub = await reg.pushManager.getSubscription();
+    console.error('[push] 操作失败', err);
+    let sub = null;
+    try {
+      const reg = await withTimeout(navigator.serviceWorker.ready, 5000, '读取注册');
+      sub = await withTimeout(reg.pushManager.getSubscription(), 5000, '读取订阅');
+    } catch (_) { /* 忽略 */ }
     toggle.checked = !!sub;
     const msg = (err && err.message) ? err.message : '未知错误';
     toast('推送操作失败：' + msg);
     if (!sub) {
       badge.textContent = '未开启';
       badge.classList.remove('on');
-      status.textContent = '订阅未成功（' + msg + '）。请确认用 Chrome/Edge 独立标签页打开，且系统通知权限已允许。';
+      status.textContent = '订阅失败：' + msg + '（若为超时，说明本机网络到浏览器推送服务不通，可换 Edge 浏览器，或改用下方微信推送）';
+    } else {
+      status.textContent = '本设备已订阅，但刚才的操作失败：' + msg;
     }
   } finally {
     toggle.disabled = false;

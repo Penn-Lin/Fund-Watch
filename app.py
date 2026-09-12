@@ -19,6 +19,17 @@ CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 app = Flask(__name__)
 
 
+@app.after_request
+def _sw_scope_header(resp):
+    """sw.js 位于 /static/ 下，默认作用域只有 /static/*，
+    会导致页面（/）里 navigator.serviceWorker.ready 永远不 resolve。
+    这里放行根作用域，前端注册时显式传 scope:'/'。"""
+    if request.path.endswith('/sw.js'):
+        resp.headers['Service-Worker-Allowed'] = '/'
+        resp.headers['Cache-Control'] = 'no-cache, must-revalidate'
+    return resp
+
+
 def load_config():
     """配置存数据库（云端实例重启不丢）；首次启动以 config.json / 默认值初始化"""
     cfg = database.get_config()
@@ -964,7 +975,7 @@ def api_push_status():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.1', 'commit': '649b885-hardtimeout'})
+    return jsonify({'version': '3.2', 'commit': 'swscope-fix'})
 
 
 @app.route('/api/db_diag')
