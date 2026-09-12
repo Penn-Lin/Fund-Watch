@@ -44,6 +44,8 @@ def send_webpush(subs, title, content):
     返回 {'sent': n, 'failed': n, 'gone': [endpoints], 'errors': [{'endpoint','error'}]}
 
     410 Gone / 404 表示客户端已取消订阅，调用方应删除这些记录。
+    401/403 表示该订阅不是用当前 VAPID 密钥创建的（密钥轮换/测试残留），
+    永远推不通，同样删掉，避免每次发送都留下一条"失败"。
     """
     import vapid
     from pywebpush import webpush
@@ -82,8 +84,13 @@ def send_webpush(subs, title, content):
                                'error': 'HTTP %s %s' % (r.status_code, (r.text or '')[:150])})
         except Exception as e:
             failed += 1
+            # pywebpush 对非 2xx 一律抛 WebPushException，状态码在 e.response 里
+            st = getattr(getattr(e, 'response', None), 'status_code', None)
+            if st in (401, 403, 404, 410):
+                gone.append(ep)  # 永久推不通：订阅失效或 VAPID 密钥不匹配
             # 不再静默吞掉：把真实原因带出来，便于在 /api/test_notify 里直接看到
-            errors.append({'endpoint': ep[-24:], 'error': '%s: %s' % (type(e).__name__, str(e)[:180])})
+            errors.append({'endpoint': ep[-24:],
+                           'error': 'HTTP %s %s: %s' % (st, type(e).__name__, str(e)[:150])})
     return {'sent': sent, 'failed': failed, 'gone': gone, 'errors': errors[:5]}
 
 
