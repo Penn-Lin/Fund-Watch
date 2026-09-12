@@ -1,10 +1,25 @@
 // Service Worker：Web Push 系统通知 + 基础离线缓存
-const CACHE = 'fund-monitor-v1';
-const ASSETS = ['/', '/static/style.css', '/static/app.js', '/static/manifest.json'];
+// 换图标/换样式后记得把 CACHE 版本号 +1，否则旧缓存会继续被用
+const CACHE = 'fund-monitor-v2';
+const ASSETS = [
+  '/',
+  '/static/style.css',
+  '/static/app.js',
+  '/static/manifest.json',
+  // 预缓存通知图标：离线收到推送时也有图标可显示
+  '/static/icons/icon-192.png?v=2',
+  '/static/icons/apple-touch-icon.png?v=2',
+];
 
 self.addEventListener('install', (e) => {
   self.skipWaiting();
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).catch(() => {}));
+  // 逐个缓存 + 各自 catch：addAll 是全有全无，任何一个 404 会导致整个预缓存失败
+  e.waitUntil(
+    caches
+      .open(CACHE)
+      .then((c) => Promise.all(ASSETS.map((u) => c.add(u).catch(() => {}))))
+      .catch(() => {})
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -40,8 +55,8 @@ self.addEventListener('push', (e) => {
   e.waitUntil(
     self.registration.showNotification(data.title || '基金涨跌监控', {
       body: data.body || '',
-      icon: '/static/icons/icon-192.png',
-      badge: '/static/icons/icon-192.png',
+      icon: '/static/icons/icon-192.png?v=2',
+      badge: '/static/icons/icon-192.png?v=2',
       tag: 'fund-alert',
       renotify: true,
       vibrate: [80, 40, 80],

@@ -23,9 +23,16 @@ app = Flask(__name__)
 def _sw_scope_header(resp):
     """sw.js 位于 /static/ 下，默认作用域只有 /static/*，
     会导致页面（/）里 navigator.serviceWorker.ready 永远不 resolve。
-    这里放行根作用域，前端注册时显式传 scope:'/'。"""
+    这里放行根作用域，前端注册时显式传 scope:'/'。
+
+    manifest.json 也必须 no-cache：Flask 给静态文件默认 Cache-Control
+    max-age=12h，manifest 一旦被缓存住，即使换了图标（URL 变了）设备也
+    不会重新拉取，表现就是"卸载重装还是旧图标"。
+    """
     if request.path.endswith('/sw.js'):
         resp.headers['Service-Worker-Allowed'] = '/'
+        resp.headers['Cache-Control'] = 'no-cache, must-revalidate'
+    elif request.path.endswith('/manifest.json'):
         resp.headers['Cache-Control'] = 'no-cache, must-revalidate'
     return resp
 
@@ -983,7 +990,7 @@ def api_push_status():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.8', 'commit': 'ui-emphasis'})
+    return jsonify({'version': '3.9', 'commit': 'icon-kline'})
 
 
 @app.route('/api/db_diag')
