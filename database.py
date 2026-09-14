@@ -277,11 +277,20 @@ def _migrate_push_subs(conn):
                     'ALTER TABLE push_subscriptions ADD COLUMN %s TEXT' % col)
 
 
+# 迁移只需在进程生命周期内成功跑一次。scheduler 每轮都会调 init_db()，
+# 如果每轮都执行 ALTER TABLE，PG 上每次都要拿 ACCESS EXCLUSIVE 锁 ——
+# 对一个每分钟都在读写的小表来说既浪费又容易和别的事务互相等锁。
+_migrated = False
+
+
 def init_db():
+    global _migrated
     conn = get_conn()
     for ddl in (_PG_DDL if USE_PG else _SQLITE_DDL):
         conn.execute(ddl)
-    _migrate_push_subs(conn)
+    if not _migrated:
+        _migrate_push_subs(conn)
+        _migrated = True          # 只有真正跑成功才置位，失败留给下一轮重试
     conn.commit()
     conn.close()
 

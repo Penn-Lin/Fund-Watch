@@ -1249,7 +1249,28 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.16', 'commit': 'brief-type'})
+    return jsonify({'version': '3.17', 'commit': 'thread-diag'})
+
+
+@app.route('/api/threads')
+def api_threads():
+    """线程栈诊断：实例"卡死"时用它看清到底堵在哪
+
+    症状是**所有**接口（连 /static/app.js 这种不碰库不碰网络的）都超时，
+    说明 worker 的线程全被占住了。黑盒只能看到"没响应"，看不到是谁堵的，
+    所以把每个线程的调用栈打出来（同 /api/db_diag 的思路）。
+    """
+    import sys
+    import traceback
+    frames = sys._current_frames()
+    items = []
+    for th in threading.enumerate():
+        fr = frames.get(th.ident)
+        stack = []
+        if fr is not None:
+            stack = [ln.strip() for ln in traceback.format_stack(fr)[-8:]]
+        items.append({'name': th.name, 'daemon': th.daemon, 'stack': stack})
+    return jsonify({'count': len(items), 'threads': items})
 
 
 @app.route('/api/db_diag')
