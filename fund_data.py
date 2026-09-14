@@ -158,39 +158,96 @@ SECTOR_HEADERS = {
 }
 
 
-def _fetch_sectors_once(po, n=2):
-    """单次拉取行业板块榜，返回 (rows, err)；err 为空字符串表示成功
+# 腾讯申万一级行业（31 个）。这个接口不支持按涨跌幅排序，但一次就能取全，
+# 本地排序反而更准；而且板块名是"医药生物/通信/电子"这种标准一级行业，
+# 比东财的细分行业（胶黏剂及胶带…）更适合"主要涨跌板块"这个说法。
+TENCENT_SECTOR_URL = ('https://proxy.finance.qq.com/cgi/cgi-bin/rank/pt/getRank'
+                      '?board_type=hy&sort_type=price&direct=down&offset=0&count=60')
 
-    把错误带出来（而不是 return []）是为了能通过 /api/sector_probe 看清
-    "板块信息为什么没进快报"——海外机房访问东财 push2 的行为和本机不一样。
-    """
+
+def _sectors_from_tencent(n):
+    """返回 (领涨列表, 领跌列表, 错误文本)"""
+    try:
+        _throttle()
+        r = requests.get(TENCENT_SECTOR_URL, headers=HEADERS, timeout=10)
+        body = (r.text or '')[:180]
+        try:
+            j = r.json()
+        except ValueError:
+            return [], [], 'HTTP %s · 响应非 JSON · body=%r' % (r.status_code, body)
+        rows = []
+        for x in ((j.get('data') or {}).get('rank_list') or []):
+            name, zdf = x.get('name'), _f(x.get('zdf'))
+            if name and zdf is not None:
+                rows.append((name, zdf))
+        if not rows:
+            return [], [], 'HTTP %s · 空列表 · body=%r' % (r.status_code, body)
+        rows.sort(key=lambda r: r[1], reverse=True)
+        return rows[:n], list(reversed(rows[-n:])), ''
+    except Exception as e:
+        return [], [], '%s: %s' % (type(e).__name__, str(e)[:200])
+
+
+def _fetch_sectors_once(po, n=2):
+    """东财单边榜单，返回 (rows, err)"""
     try:
         _throttle()
         r = requests.get(SECTOR_URL % {'n': n, 'po': po},
                          headers=SECTOR_HEADERS, timeout=10)
         body = (r.text or '')[:180]
-        diff = ((r.json().get('data') or {}).get('diff') or [])
+        try:
+            j = r.json()
+        except ValueError:
+            return [], 'HTTP %s · 响应非 JSON · body=%r' % (r.status_code, body)
         rows = []
-        for x in diff:
+        for x in ((j.get('data') or {}).get('diff') or []):
             name, chg = x.get('f14'), _f(x.get('f3'))
             if name and chg is not None:
                 rows.append((name, chg))
         if not rows:
-            return [], 'HTTP %s · 无数据 · body=%s' % (r.status_code, body)
+            return [], 'HTTP %s · 空列表 · body=%r' % (r.status_code, body)
         return rows, ''
     except Exception as e:
         return [], '%s: %s' % (type(e).__name__, str(e)[:200])
 
 
-def fetch_sectors(n=2):
-    """取行业板块涨跌幅前 N，返回 (领涨列表, 领跌列表)，每项 (名称, 涨跌幅%)
+def _sectors_from_eastmoney(n):
+    """返回 (领涨列表, 领跌列表, 错误文本)。东财要两次请求（升降序各一次）"""
+    lead, err = _fetch_sectors_once(1, n)
+    if err:
+        return [], [], '领涨榜 ' + err
+    lag, err = _fetch_sectors_once(0, n)
+    if err:
+        return [], [], '领跌榜 ' + err
+    return lead, lag, ''
 
-    板块只是快报的锦上添花：任何异常都降级为空列表，
+
+# 数据源按顺序回退：腾讯优先（qt.gtimg.cn 这一系已证明从 Render 可达），
+# 东财 push2 兜底 —— 实测 push2 对海外机房返回空 body，所以它只能当备选。
+SECTOR_SOURCES = [('腾讯申万一级', _sectors_from_tencent),
+                  ('东财行业板块', _sectors_from_eastmoney)]
+
+
+def fetch_sectors(n=2):
+    """取涨跌幅前 N 的行业板块，返回 (领涨列表, 领跌列表)，每项 (名称, 涨跌幅%)
+
+    板块只是快报的锦上添花：所有数据源都失败就返回空列表，
     绝不能因为板块接口挂了就让快报发不出去。
     """
-    lead, _ = _fetch_sectors_once(1, n)
-    lag, _ = _fetch_sectors_once(0, n)
-    return lead, lag
+    for _name, fn in SECTOR_SOURCES:
+        lead, lag, err = fn(n)
+        if not err and (lead or lag):
+            return lead, lag
+    return [], []
+
+
+def probe_sectors(n=3):
+    """诊断用：把每个数据源的原始结果与错误都列出来（供 /api/sector_probe）"""
+    out = []
+    for name, fn in SECTOR_SOURCES:
+        lead, lag, err = fn(n)
+        out.append({'source': name, 'leading': lead, 'lagging': lag, 'error': err})
+    return out
 
 
 def _quote_date(raw):

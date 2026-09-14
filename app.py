@@ -1073,13 +1073,10 @@ def api_sector_probe():
     板块信息只是快报的附加项，抓不到不影响主流程 —— 但需要能看到"为什么抓不到"，
     否则只能看到快报里默默少了一行。
     """
-    lead, err_lead = fund_data._fetch_sectors_once(1, 3)
-    lag, err_lag = fund_data._fetch_sectors_once(0, 3)
-    return jsonify({
-        'ok': bool(lead) or bool(lag),
-        'leading': {'rows': lead, 'error': err_lead},
-        'lagging': {'rows': lag, 'error': err_lag},
-    })
+    attempts = fund_data.probe_sectors(3)
+    return jsonify({'ok': any(a['leading'] or a['lagging'] for a in attempts),
+                    'attempts': attempts,
+                    'effective': fund_data.fetch_sectors(2)})
 
 
 @app.route('/api/alerts/<int:aid>', methods=['DELETE'])
@@ -1252,7 +1249,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.14', 'commit': 'sector-probe'})
+    return jsonify({'version': '3.15', 'commit': 'sector-chain'})
 
 
 @app.route('/api/db_diag')
