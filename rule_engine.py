@@ -209,7 +209,11 @@ def evaluate_all():
     """评估所有启用基金的规则，返回需要提醒的 alert 列表"""
     conn = database.get_conn()
     alerts = []
-    now = now()
+    # 注意：这里**不能**写 `now = now()`。函数体内对 now 赋值会让 Python 把
+    # now 视作局部变量，右边调用时该局部还没绑定 → UnboundLocalError。
+    # 后果是 evaluate_all 每次都抛异常、整轮扫描失败、基金提醒一条都发不出来
+    # （2026-09-12 03:29 引入，09-14 才发现），所以本地名统一叫 now_dt。
+    now_dt = now()
     tstr = today_str()
     funds = conn.execute('SELECT * FROM funds WHERE enabled=1').fetchall()
     for f in funds:
@@ -231,6 +235,6 @@ def evaluate_all():
             alerts += _eval_daily(conn, daily_rule, d, tstr)
         cum_rule = _get_rule(conn, f['code'], 'cumulative')
         if cum_rule:
-            alerts += _eval_cumulative(conn, cum_rule, d, now, tstr)
+            alerts += _eval_cumulative(conn, cum_rule, d, now_dt, tstr)
     conn.close()
     return alerts

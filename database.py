@@ -227,6 +227,19 @@ _SQLITE_DDL = [
         cfg_key TEXT PRIMARY KEY,
         value TEXT
     )''',
+    # 盘中简报去重：按 (日期, 类型, 时点/档位) 唯一。
+    # 用结构化列而不是像 alert_log 那样按 trigger_time LIKE 匹配，
+    # 因为时点是需要精确比对的（'09:35' vs '9:35'），而且 Render 重启后
+    # 必须靠 DB 里这条记录才不会再推一遍。
+    '''CREATE TABLE IF NOT EXISTS intraday_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        stat_date TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        sent_at TEXT,
+        avg_change REAL,
+        UNIQUE (stat_date, kind, slot)
+    )''',
     '''CREATE TABLE IF NOT EXISTS push_subscriptions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         endpoint TEXT UNIQUE NOT NULL,
@@ -331,6 +344,40 @@ def save_sub(endpoint, p256dh, auth, ua=None):
             "INSERT OR REPLACE INTO push_subscriptions "
             "(endpoint, p256dh, auth, created_at, ua) VALUES (?,?,?,?,?)",
             (endpoint, p256dh, auth, now, ua))
+    conn.commit()
+    conn.close()
+
+
+# ------------------------- 盘中简报状态 -------------------------
+
+def intraday_sent(stat_date, kind, slot):
+    """这一档（日期/类型/时点）是不是已经处理过了"""
+    conn = get_conn()
+    row = conn.execute(
+        'SELECT COUNT(*) AS c FROM intraday_log '
+        'WHERE stat_date=? AND kind=? AND slot=?', (stat_date, kind, slot)).fetchone()
+    conn.close()
+    return row['c'] > 0
+
+
+def intraday_mark(stat_date, kind, slot, avg_change=None, sent_at=None):
+    """标记已处理。
+
+    注意「静默顺延」也要 mark：到点但因为变动太小没推的时点，同样算处理过，
+    否则每轮扫描都会重新评估它，而且过了窗口还会突然补推一条过时简报。
+    """
+    import datetime
+    now = sent_at or datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_conn()
+    if USE_PG:
+        conn.execute(
+            'INSERT INTO intraday_log (stat_date, kind, slot, sent_at, avg_change) '
+            'VALUES (%s,%s,%s,%s,%s) ON CONFLICT (stat_date, kind, slot) DO NOTHING',
+            (stat_date, kind, slot, now, avg_change))
+    else:
+        conn.execute(
+            'INSERT OR IGNORE INTO intraday_log (stat_date, kind, slot, sent_at, avg_change) '
+            'VALUES (?,?,?,?,?)', (stat_date, kind, slot, now, avg_change))
     conn.commit()
     conn.close()
 

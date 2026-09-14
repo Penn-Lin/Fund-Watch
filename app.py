@@ -130,7 +130,15 @@ def _scan_once_impl():
             conn.close()
 
     _scan_stage = 'evaluating'
-    alerts = rule_engine.evaluate_all()
+    # 兜住：规则评估里任何一个 bug 都不该把整轮扫描拖垮（行情已经入库了，
+    # 而且指数类提醒走的是 scheduler 里另一条独立路径）。但要大声打日志，
+    # 不能静默——evaluate_all 曾经因 UnboundLocalError 全程抛异常，
+    # 结果基金提醒整整两天一条都没发出去，却不留任何痕迹。
+    try:
+        alerts = rule_engine.evaluate_all()
+    except Exception as e:
+        print('evaluate_all error (基金规则评估失败，本轮跳过):', repr(e))
+        alerts = []
     _scan_stage = 'alert_insert'
     pending = []
     conn = database.get_conn()
@@ -470,6 +478,145 @@ def maybe_eval_indices():
     return sent
 
 
+# ------------------------- 盘中快报（时点骨架） -------------------------
+# 定位：**感知型**提醒 —— 盘中快速知道"大盘现在大概什么情况"。
+# 用户明确要求（2026-09-14）：
+#   · 到点就发，**不做任何"变动太小就不推"的抑制**（那是给噪音型提醒用的，
+#     快报本身就是信息，不是告警）
+#   · 只留重点（大盘均值 / 几跌几涨 / 领跌领涨），一行说完，不列全量明细
+#   · 与指数阈值提醒（index_alert）**完全独立**：互不影响、互不抑制、
+#     不共享状态。两者可以同时触发，也可以只触发其中一个。
+
+DEFAULT_BRIEF_SLOTS = ['09:35', '11:30', '14:30']
+# 时点过了这么久还没发成就不再发 —— 免得实例恢复后突然补推一条"09:35 快报"，
+# 时间对不上反而让人误判。这是防错，不是抑制。
+BRIEF_SLOT_WINDOW_MIN = 20
+
+
+def _is_hhmm(s):
+    try:
+        h, m = (int(x) for x in str(s).split(':'))
+    except Exception:
+        return False
+    return 0 <= h <= 23 and 0 <= m <= 59
+
+
+def _intraday_cfg(cfg):
+    """取盘中快报配置并补默认值（老配置里没这个 key 也能正常跑）"""
+    ib = cfg.get('intraday_brief') or {}
+    slots = ib.get('slots') or DEFAULT_BRIEF_SLOTS
+    if isinstance(slots, str):
+        slots = slots.replace('，', ',').split(',')
+    slots = sorted({str(s).strip() for s in slots if _is_hhmm(str(s).strip())})
+    if not slots:
+        slots = list(DEFAULT_BRIEF_SLOTS)
+    return {'enabled': bool(ib.get('enabled')), 'slots': slots}
+
+
+def _index_panel():
+    """快报用的指数面板：**只取 A 股核心指数**的当日行情
+
+    港股/美股不进：快报是"看看今天大盘怎么样"，混进恒生会让均值失去意义
+    （港股和 A 股经常反向）。港股/美股由 17:00 的指数收盘汇总覆盖。
+    返回 (rows, avg)，avg = 等权平均。
+    """
+    indices = fund_data.fetch_indices(max_age=60)
+    if not indices:
+        return [], None
+    today = rule_engine.today_str()
+    rows = []
+    for ix in indices:
+        secid = ix.get('secid') or ''
+        if not secid.startswith(('sh', 'sz')):
+            continue
+        # 行情日期不是今天的就不进面板（节假日/接口滞后）
+        if (ix.get('quote_date') or '') != today:
+            continue
+        chg = ix.get('change_pct')
+        if chg is None:
+            continue
+        rows.append({'name': ix['name'], 'change_pct': chg})
+    if not rows:
+        return [], None
+    return rows, sum(r['change_pct'] for r in rows) / len(rows)
+
+
+def _build_intraday_line(slot, rows, avg):
+    """快报正文 —— 刻意只有一行：时间 · 大盘 · 几跌几涨 · 领跌领涨
+
+    不放全量指数明细：这是"快速了解"用的，重点比完整重要。
+    大盘均值另由 alert.current_change 携带，前端会把它渲染成大字。
+    """
+    down = sum(1 for r in rows if r['change_pct'] < 0)
+    up = sum(1 for r in rows if r['change_pct'] > 0)
+    parts = [slot, '大盘 %s%.2f%%' % ('+' if avg > 0 else '', avg),
+             '%d 跌 %d 涨' % (down, up)]
+    worst = min(rows, key=lambda r: r['change_pct'])
+    best = max(rows, key=lambda r: r['change_pct'])
+    if worst['change_pct'] < 0:
+        parts.append('领跌 %s %.2f%%' % (worst['name'], worst['change_pct']))
+    if best['change_pct'] > 0:
+        parts.append('领涨 %s +%.2f%%' % (best['name'], best['change_pct']))
+    return ' · '.join(parts)
+
+
+def _log_intraday_alert(code, name, kind, avg, msg, result):
+    conn = database.get_conn()
+    conn.execute(
+        'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
+        'current_change, trigger_time, message, notify_status) '
+        'VALUES (?,?,?,?,?,?,?,?,?)',
+        (code, name, 'index', ('down' if (avg or 0) < 0 else 'up'), kind,
+         avg, rule_engine.now_str(), msg, 'sent' if result['ok'] else 'failed'))
+    conn.commit()
+    conn.close()
+
+
+def maybe_send_intraday_brief():
+    """到点就发一条大盘快报。
+
+    没有静默闸门、没有状态耦合 —— 三个时点到点各发一条，内容就是当时的实况。
+    `intraday_log` 只用于「这个时点今天处理过没有」的去重，
+    防止 Render 重启或调度重入导致同一时点重复推送。
+    """
+    cfg = load_config()
+    ib = _intraday_cfg(cfg)
+    if not ib['enabled']:
+        return 0
+    now = rule_engine.now()
+    if not rule_engine.is_trading_day(now):
+        return 0
+    today = rule_engine.today_str()
+
+    # 找「已到点、今天还没处理、且没过窗口」的最早时点
+    due = None
+    for s in ib['slots']:
+        if database.intraday_sent(today, 'slot', s):
+            continue
+        h, m = (int(x) for x in s.split(':'))
+        slot_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        if now < slot_at:
+            break                      # 还没到点；后面的时点更晚，不用看
+        if (now - slot_at).total_seconds() > BRIEF_SLOT_WINDOW_MIN * 60:
+            # 错过太久就不发了（防错），标记掉免得每轮扫描反复评估
+            database.intraday_mark(today, 'slot', s)
+            continue
+        due = s
+        break
+    if not due:
+        return 0
+
+    rows, avg = _index_panel()
+    if not rows:
+        return 0
+
+    line = _build_intraday_line(due, rows, avg)
+    result = notifier.send_alert(cfg, '基金监控 · 盘中快报', line)
+    database.intraday_mark(today, 'slot', due, avg)
+    _log_intraday_alert('IX_BRIEF', '盘中快报', 'intraday_brief', avg, line, result)
+    return 1
+
+
 def scheduler_loop():
     while True:
         cycle_ok = True
@@ -495,6 +642,11 @@ def scheduler_loop():
             maybe_eval_indices()
         except Exception as e:
             print('index alert error:', e)
+            cycle_ok = False
+        try:
+            maybe_send_intraday_brief()
+        except Exception as e:
+            print('intraday brief error:', e)
             cycle_ok = False
         try:
             maybe_send_index_summary()
@@ -907,7 +1059,10 @@ def api_summary():
 @app.route('/api/config', methods=['GET', 'POST'])
 def api_config():
     if request.method == 'GET':
-        return jsonify(load_config())
+        cfg = load_config()
+        # 归一化返回，保证前端拿到的永远是补好默认值的完整结构
+        cfg['intraday_brief'] = _intraday_cfg(cfg)
+        return jsonify(cfg)
     data = request.get_json(silent=True) or {}
     cfg = load_config()
     for k in ('serverchan_sendkey', 'pushplus_token',
@@ -938,6 +1093,10 @@ def api_config():
             'enabled': bool(usix.get('enabled')),
             'time': str(usix.get('time') or '08:00'),
         }
+    if 'intraday_brief' in data:
+        ib = data['intraday_brief'] or {}
+        norm = _intraday_cfg({'intraday_brief': ib})
+        cfg['intraday_brief'] = norm
     if 'email' in data:
         cfg['email'] = data['email']
     save_config(cfg)
@@ -1046,7 +1205,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.11', 'commit': 'index-fresh'})
+    return jsonify({'version': '3.12', 'commit': 'intraday-brief'})
 
 
 @app.route('/api/db_diag')
@@ -1089,7 +1248,10 @@ def _bootstrap():
     start_scheduler()
 
 
-threading.Thread(target=_bootstrap, daemon=True).start()
+# 自测（selftest.py）只想拿到纯函数，不需要调度线程去抓行情/连库。
+# 该开关让 app 可以被安全 import。
+if not os.environ.get('FUNDWATCH_NO_SCHEDULER'):
+    threading.Thread(target=_bootstrap, daemon=True).start()
 
 
 def main():
