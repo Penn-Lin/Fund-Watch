@@ -1260,7 +1260,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.19', 'commit': 'boot-diag'})
+    return jsonify({'version': '3.20', 'commit': 'sched-owner'})
 
 
 @app.route('/api/threads')
@@ -1333,6 +1333,7 @@ def ensure_scheduler():
         _sched_thread.start()
         _sched_last_start = time.time()
         _scheduler_started = True
+        _boot['scheduler_pid'] = os.getpid()
         return True
 
 
@@ -1371,10 +1372,22 @@ def api_boot():
 # 启动过程留痕：调度线程没起来时，光看接口是"一切正常"的，
 # 必须能回看到底哪一步没走成（/api/boot）
 _boot = {'at': None, 'pid': None, 'skip_env': None, 'init_db_error': None,
-         'scheduler_start_error': None}
+         'scheduler_pid': None}
 
 
 def _bootstrap():
+    """import 期初始化：只做建表，**不启动调度线程**。
+
+    ⚠️ 关键教训（2026-09-14 实测）：gunicorn 会在 master 进程里 import 应用，
+    然后 fork 出 worker 来处理请求 —— 而**线程不会跟着 fork 过去**。
+    实测证据：/api/boot 记录的 pid=57（master，bootstrap 在这里跑），
+    但同一响应里 os.getpid()=60（真正的 worker）。所以在这里起的调度线程
+    只活在 master 里，worker 侧永远看不到它。
+
+    因此调度线程统一交给 ensure_scheduler()，在真正处理请求的进程里拉起
+    （见 before_request 钩子）；本地 `python app.py` 在 __main__ 里显式启动。
+    这样也顺带修掉一个隐患：worker 被回收重建时，调度器会随首个请求自动回来。
+    """
     _boot['at'] = rule_engine.now_str()
     _boot['pid'] = os.getpid()
     _boot['skip_env'] = os.environ.get('FUNDWATCH_NO_SCHEDULER')
@@ -1383,20 +1396,18 @@ def _bootstrap():
     except Exception as e:
         _boot['init_db_error'] = '%s: %s' % (type(e).__name__, str(e)[:300])
         print('bootstrap init_db error (scheduler will retry):', e)
-    try:
-        start_scheduler()
-    except Exception as e:
-        _boot['scheduler_start_error'] = '%s: %s' % (type(e).__name__, str(e)[:300])
-        print('bootstrap start_scheduler error:', e)
 
 
-# 自测（selftest.py）只想拿到纯函数，不需要调度线程去抓行情/连库。
-# 该开关让 app 可以被安全 import。
+# 自测（selftest.py）只想拿到纯函数，不需要连库。
+# 该开关让 app 可以被安全 import。注意这里**只建表、不起调度线程**。
 if not os.environ.get('FUNDWATCH_NO_SCHEDULER'):
     threading.Thread(target=_bootstrap, daemon=True).start()
 
 
 def main():
+    # 本地直跑不会走 gunicorn 的 master/fork 那套，
+    # 没有请求进来 before_request 也不会触发 → 这里显式起调度线程
+    ensure_scheduler()
     app.run(host='127.0.0.1', port=5000, debug=False)
 
 
