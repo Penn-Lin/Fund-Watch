@@ -1260,7 +1260,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.18', 'commit': 'sched-health'})
+    return jsonify({'version': '3.19', 'commit': 'boot-diag'})
 
 
 @app.route('/api/threads')
@@ -1308,32 +1308,86 @@ def api_db_diag():
 _scheduler_started = False
 _scheduler_lock = threading.Lock()
 _sched_thread = None
+_sched_last_start = 0.0
 
 
-def start_scheduler():
-    """启动后台调度线程（python app.py 与 gunicorn 两种方式都只启动一次）"""
-    global _scheduler_started
+def ensure_scheduler():
+    """确保调度线程活着；死了就重新拉起（幂等）。
+
+    为什么不只在 import 时起一次：调度线程是**唯一**触发盘中快报和各种定时
+    汇总的地方，而 cron 仍会正常打 /api/refresh、页面也照常能用 ——
+    它一旦没起来（import 期异常 / fork 之后线程不存在），
+    表面完全看不出来，只会表现为"该推的都没推"。
+    所以每个请求都顺手确认一次，线程没了就补一个；最短 60s 才重启一次，
+    避免万一线程秒崩造成反复创建。
+    """
+    global _scheduler_started, _sched_thread, _sched_last_start
     with _scheduler_lock:
-        if _scheduler_started:
-            return
-        _scheduler_started = True
-        global _sched_thread
+        if _sched_thread is not None and _sched_thread.is_alive():
+            return False
+        if time.time() - _sched_last_start < 60:
+            return False
         # 起个名字，方便在 /api/threads 的线程栈里一眼认出来
         _sched_thread = threading.Thread(target=scheduler_loop, daemon=True,
                                          name='fund-scheduler')
         _sched_thread.start()
+        _sched_last_start = time.time()
+        _scheduler_started = True
+        return True
+
+
+def start_scheduler():
+    """兼容旧调用点：启动后台调度线程"""
+    ensure_scheduler()
+
+
+@app.before_request
+def _keep_scheduler_alive():
+    """每个请求顺手确认调度线程还活着（幂等，正常路径只做一次 is_alive 判断）。
+
+    这是兜底：调度线程缺失时接口全都"正常"，只有靠它自愈才不会静默失效。
+    """
+    try:
+        ensure_scheduler()
+    except Exception as e:
+        print('ensure_scheduler error:', e)
+
+
+@app.route('/api/boot')
+def api_boot():
+    """启动留痕 + 调度线程现状，用于排查"该推的没推"这类静默故障"""
+    return jsonify({
+        'boot': _boot,
+        'scheduler_alive': bool(_sched_thread and _sched_thread.is_alive()),
+        'scheduler': _sched_state,
+        'pid': os.getpid(),
+    })
 
 
 # 后台初始化：不阻塞 app 启动。Neon 冷启动时 init_db 可能卡住，若在
 # 模块级同步执行会导致 gunicorn 起不来、Render 部署失败回滚到旧代码。
 # init_db 与 start_scheduler 移到后台线程；scheduler_loop 内每轮也会
 # 幂等重试 init_db，Neon 恢复后自动建表并开始扫描。
+# 启动过程留痕：调度线程没起来时，光看接口是"一切正常"的，
+# 必须能回看到底哪一步没走成（/api/boot）
+_boot = {'at': None, 'pid': None, 'skip_env': None, 'init_db_error': None,
+         'scheduler_start_error': None}
+
+
 def _bootstrap():
+    _boot['at'] = rule_engine.now_str()
+    _boot['pid'] = os.getpid()
+    _boot['skip_env'] = os.environ.get('FUNDWATCH_NO_SCHEDULER')
     try:
         database.init_db()
     except Exception as e:
+        _boot['init_db_error'] = '%s: %s' % (type(e).__name__, str(e)[:300])
         print('bootstrap init_db error (scheduler will retry):', e)
-    start_scheduler()
+    try:
+        start_scheduler()
+    except Exception as e:
+        _boot['scheduler_start_error'] = '%s: %s' % (type(e).__name__, str(e)[:300])
+        print('bootstrap start_scheduler error:', e)
 
 
 # 自测（selftest.py）只想拿到纯函数，不需要调度线程去抓行情/连库。
