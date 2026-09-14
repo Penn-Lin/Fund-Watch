@@ -149,28 +149,48 @@ def fetch_history(code, days=30, retries=2):
 # fs=m:90 t:2 是行业板块。板块信息只是快报的"锦上添花"，请求失败一律降级为空。
 SECTOR_URL = ('https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=%(n)d&po=%(po)d'
               '&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=f3,f14')
+# push2 是东财的行情 CDN，和 fundmobapi 不是同一套风控：这里给常规浏览器头
+# （fundmobapi 那边必须精简 UA，两者策略相反，别互相套用）
+SECTOR_HEADERS = {
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+    'Referer': 'https://quote.eastmoney.com/center/boardlist.html',
+}
+
+
+def _fetch_sectors_once(po, n=2):
+    """单次拉取行业板块榜，返回 (rows, err)；err 为空字符串表示成功
+
+    把错误带出来（而不是 return []）是为了能通过 /api/sector_probe 看清
+    "板块信息为什么没进快报"——海外机房访问东财 push2 的行为和本机不一样。
+    """
+    try:
+        _throttle()
+        r = requests.get(SECTOR_URL % {'n': n, 'po': po},
+                         headers=SECTOR_HEADERS, timeout=10)
+        body = (r.text or '')[:180]
+        diff = ((r.json().get('data') or {}).get('diff') or [])
+        rows = []
+        for x in diff:
+            name, chg = x.get('f14'), _f(x.get('f3'))
+            if name and chg is not None:
+                rows.append((name, chg))
+        if not rows:
+            return [], 'HTTP %s · 无数据 · body=%s' % (r.status_code, body)
+        return rows, ''
+    except Exception as e:
+        return [], '%s: %s' % (type(e).__name__, str(e)[:200])
 
 
 def fetch_sectors(n=2):
     """取行业板块涨跌幅前 N，返回 (领涨列表, 领跌列表)，每项 (名称, 涨跌幅%)
 
-    任何异常都返回空列表 —— 快报不能因为板块接口挂了就发不出去。
+    板块只是快报的锦上添花：任何异常都降级为空列表，
+    绝不能因为板块接口挂了就让快报发不出去。
     """
-    out = []
-    for po in (1, 0):
-        got = []
-        try:
-            _throttle()
-            r = requests.get(SECTOR_URL % {'n': n, 'po': po}, headers=HEADERS, timeout=8)
-            diff = ((r.json().get('data') or {}).get('diff') or [])
-            for x in diff:
-                name, chg = x.get('f14'), _f(x.get('f3'))
-                if name and chg is not None:
-                    got.append((name, chg))
-        except Exception:
-            got = []
-        out.append(got)
-    return out[0], out[1]
+    lead, _ = _fetch_sectors_once(1, n)
+    lag, _ = _fetch_sectors_once(0, n)
+    return lead, lag
 
 
 def _quote_date(raw):
