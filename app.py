@@ -1249,7 +1249,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.15', 'commit': 'sector-chain'})
+    return jsonify({'version': '3.16', 'commit': 'brief-type'})
 
 
 @app.route('/api/db_diag')

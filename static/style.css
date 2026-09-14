@@ -614,6 +614,36 @@ main { padding: 14px 14px 96px; }
 .q-list.bars-lg .q-track { height: 6px; }
 .q-list.bars-lg .q-row { padding: 12px 0; }
 
+/* ========== 盘中快报：结论区分层排版（标签灰 · 名称深 · 数值涨红跌绿） ========== */
+.bn-row { display: block; }
+.bn-row.bn-sec { margin-top: 2px; }
+.bn { display: inline-flex; align-items: baseline; gap: 4px; margin-right: 10px; }
+.bn i { font-style: normal; font-size: 10.5px; color: var(--text-3); }
+.bn b {
+  font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.bn b.up { color: var(--red); }
+.bn b.down { color: var(--green); }
+.pop-sub-brief { -webkit-line-clamp: 3; }
+
+.brief-sum { background: #f8f9fb; border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; }
+.bs-line, .bs-cell { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.bs-k { flex: none; font-size: 11px; color: var(--text-3); }
+.bs-n { font-size: 12.5px; color: var(--text); }
+.bs-v {
+  font-family: var(--mono); font-size: 13px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.bs-v.up { color: var(--red); }
+.bs-v.down { color: var(--green); }
+.bs-v.flat { color: var(--text-2); }
+.bs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; margin-top: 8px; }
+.bs-sec-block { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.bs-secline { margin-top: 4px; }
+.bs-secline .bs-k { min-width: 52px; }
+.bs-secline .bs-n { color: var(--text-2); font-size: 12px; }
+
 .ad-sec {
   font-size: 11px; font-weight: 600; color: var(--text-3);
   letter-spacing: .5px; margin: 0 0 4px;

@@ -43,7 +43,7 @@ conn.execute('DELETE FROM funds WHERE code=?', ('999999',))
 conn.execute('DELETE FROM nav_history WHERE code=?', ('999999',))
 conn.commit()
 conn.close()
-print('[1/7] SQLite 业务回归 OK')
+print('[1/8] SQLite 业务回归 OK')
 
 # ---------- 2. PgConn SQL 方言转换（不连库，仅验证字符串转换） ----------
 import importlib
@@ -81,7 +81,7 @@ fake.execute('UPDATE alert_log SET notify_status=? WHERE id=?', ('sent', 1))
 assert fake.sqls[-1] == 'UPDATE alert_log SET notify_status=%s WHERE id=%s'
 fake.execute('DELETE FROM rules WHERE id=?', (1,))
 assert fake.sqls[-1] == 'DELETE FROM rules WHERE id=%s'
-print('[2/7] PgConn SQL 方言转换 OK')
+print('[2/8] PgConn SQL 方言转换 OK')
 
 # ---------- 3. PG DDL 语法检查（不应残留 AUTOINCREMENT / 裸 REAL / 粘连词） ----------
 import re
@@ -91,7 +91,7 @@ bad = [d for d in database._PG_DDL
        or re.search(r'\wTEXT|\wDOUBLE|\wINTEGER|\wPRIMARY', d)]
 assert not bad, 'PG DDL 存在 SQLite 残留/词法粘连: %s' % bad
 assert all('GENERATED ALWAYS AS IDENTITY' in d for d in database._PG_DDL if 'id INTEGER' in d)
-print('[3/7] PG DDL 语法 OK')
+print('[3/8] PG DDL 语法 OK')
 
 # ---------- 4. 基金规则评估不得抛异常（回归：曾导致基金提醒全程失效） ----------
 # 2026-09-12 03:29 evaluate_all 里写了 `now = now()`，函数体内对 now 赋值使其
@@ -100,7 +100,7 @@ print('[3/7] PG DDL 语法 OK')
 import rule_engine
 alerts = rule_engine.evaluate_all()
 assert isinstance(alerts, list), 'evaluate_all 必须返回 list'
-print('[4/7] evaluate_all 无异常 OK（返回 %d 条待提醒）' % len(alerts))
+print('[4/8] evaluate_all 无异常 OK（返回 %d 条待提醒）' % len(alerts))
 
 # ---------- 5. 行情日期解析（阈值提醒/快报共用，两种格式都要认） ----------
 import fund_data
@@ -108,7 +108,7 @@ assert fund_data._quote_date('20260914133727') == '2026-09-14', 'A股紧凑格�
 assert fund_data._quote_date('2026/09/14 13:22:28') == '2026-09-14', '港股格式解析失败'
 assert fund_data._quote_date('') is None and fund_data._quote_date(None) is None
 assert fund_data._quote_date('abc') is None
-print('[5/7] 行情日期解析 OK')
+print('[5/8] 行情日期解析 OK')
 
 # ---------- 6. 盘中快报去重表 ----------
 import database as db2
@@ -129,7 +129,7 @@ conn.execute('DELETE FROM intraday_log WHERE stat_date=?', (D,))
 conn.commit()
 conn.close()
 assert n == 1, '同一 (日期,类型,时点) 必须唯一，实际 %d 行' % n
-print('[6/7] 盘中快报去重 OK')
+print('[6/8] 盘中快报去重 OK')
 
 # ---------- 7. 盘中快报纯函数（不联网） ----------
 os.environ['FUNDWATCH_NO_SCHEDULER'] = '1'   # 只 import 纯函数，不起调度线程
@@ -157,6 +157,24 @@ assert '板块领涨 医疗服务' in note and '板块领跌 种植业' in note
 msg2 = app_mod._build_intraday_message('11:30', ROWS, -0.4, ([], []))
 # 标题 + 每个指数一行 + 总结一行
 assert '板块' not in msg2 and msg2.count('\n') == len(ROWS) + 1, msg2
-print('[7/7] 盘中快报纯函数 OK →\n%s' % msg)
+print('[7/8] 盘中快报纯函数 OK →\n%s' % msg)
+
+# ---------- 8. 前端解析/排版回归（node uitest.mjs） ----------
+# 后端消息格式与前端解析强耦合，改了文案没改前端就是"App 里退化成一大坨灰字"，
+# 不报错、很难发现 —— 所以单独用一个 node 脚本把这条耦合钉住。
+import shutil
+import subprocess
+node = shutil.which('node')
+uitest = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uitest.mjs')
+if not node:
+    print('[8/8] 跳过前端回归（未找到 node）')
+elif not os.path.exists(uitest):
+    print('[8/8] 跳过前端回归（uitest.mjs 不存在）')
+else:
+    r = subprocess.run([node, uitest], capture_output=True, text=True, cwd=os.path.dirname(uitest))
+    tail = (r.stdout or '').strip().splitlines()
+    print('[8/8] 前端回归 %s → %s' % ('OK' if r.returncode == 0 else '失败',
+                                     tail[-1] if tail else (r.stderr or '').strip()[:200]))
+    assert r.returncode == 0, '前端回归失败:\n' + (r.stdout or '') + (r.stderr or '')
 
 print('\n全部自测通过 ✓ （云端真实连接建议拿到 Neon 连接串后再跑一次冒烟测试）')

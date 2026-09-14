@@ -933,7 +933,10 @@ function alertParts(a) {
     const lead = `<b class="down">${down}</b> 跌 · <b class="up">${up}</b> 涨`;
     // 有补充说明（快报的"均值/领跌/板块"）就直接用它当副文案——那是后端算好的总结，
     // 比前端拼的"共 N 项 · 最深…"信息更全；没有则退回原来的拼法（收盘汇总等仍走这条）
-    if (p.notes && p.notes.length) return { lead, sub: esc(p.notes.join(' · ')) };
+    if (p.notes && p.notes.length) {
+      const note = p.notes.join(' · ');
+      return { lead, sub: a.kind === 'intraday_brief' ? briefSubHTML(note) : esc(note) };
+    }
     let sub = `共 ${p.rows.length} 项`;
     if (worst.pct < 0) sub += ` · 最深 ${esc(worst.name)} <b class="down">${pct(worst.pct)}</b>`;
     if (best.pct > 0) sub += ` · 最强 ${esc(best.name)} <b class="up">${pct(best.pct)}</b>`;
@@ -967,6 +970,83 @@ function alertParts(a) {
   return { lead, sub };
 }
 
+/**
+ * 拆解盘中快报的总结行。
+ * 格式由后端 `app._build_intraday_message` 的最后一行产出，形如：
+ *   均值 -0.54% · 领跌 科创50 -1.58% · 领涨 恒生指数 +0.31% ·
+ *   板块领涨 医药生物 +2.21%、汽车 +0.87% · 板块领跌 通信 -2.77%
+ * 解析失败一律返回空值，调用方会退回原文展示（不要让它抛异常）。
+ */
+function parseBriefNote(note) {
+  const out = { avg: null, worst: null, best: null, lead: [], lag: [] };
+  const N = '([+-]?\\d+(?:\\.\\d+)?)%';
+  const pair = (s) => {
+    const m = String(s).trim().match(new RegExp('^(.+?)\\s+' + N + '$'));
+    return m ? { name: m[1].trim(), pct: parseFloat(m[2]) } : null;
+  };
+  String(note || '').split(' · ').forEach((seg) => {
+    const s = seg.trim();
+    let m;
+    if ((m = s.match(new RegExp('^均值\\s+' + N + '$')))) out.avg = parseFloat(m[1]);
+    else if ((m = s.match(new RegExp('^领跌\\s+(.+?)\\s+' + N + '$')))) out.worst = { name: m[1], pct: parseFloat(m[2]) };
+    else if ((m = s.match(new RegExp('^领涨\\s+(.+?)\\s+' + N + '$')))) out.best = { name: m[1], pct: parseFloat(m[2]) };
+    else if ((m = s.match(/^板块领涨\s+(.+)$/))) out.lead = m[1].split('、').map(pair).filter(Boolean);
+    else if ((m = s.match(/^板块领跌\s+(.+)$/))) out.lag = m[1].split('、').map(pair).filter(Boolean);
+  });
+  return out;
+}
+
+const briefEmpty = (b) => b.avg === null && !b.worst && !b.best;
+
+/** 浮层/记录页用的紧凑版：标签灰、名称深色、数值涨红跌绿，分两行 */
+function briefSubHTML(note) {
+  const b = parseBriefNote(note);
+  if (briefEmpty(b)) return esc(note);
+  const chip = (label, body) => `<span class="bn"><i>${label}</i>${body}</span>`;
+  const val = (v) => `<b class="${cls(v)}">${pct(v)}</b>`;
+  const row1 = [];
+  if (b.avg !== null) row1.push(chip('均值', val(b.avg)));
+  if (b.worst) row1.push(chip('领跌', `${esc(b.worst.name)}${val(b.worst.pct)}`));
+  if (b.best) row1.push(chip('领涨', `${esc(b.best.name)}${val(b.best.pct)}`));
+  const sec = [];
+  if (b.lead.length) sec.push(chip('板块领涨', b.lead.map((x) => `${esc(x.name)}${val(x.pct)}`).join('')));
+  if (b.lag.length) sec.push(chip('板块领跌', b.lag.map((x) => `${esc(x.name)}${val(x.pct)}`).join('')));
+  return `<span class="bn-row">${row1.join('')}</span>`
+    + (sec.length ? `<span class="bn-row bn-sec">${sec.join('')}</span>` : '');
+}
+
+/** 详情页用的完整版：分成「均值 / 领跌领涨 / 板块」三块 */
+function briefSummaryHTML(note) {
+  const b = parseBriefNote(note);
+  if (briefEmpty(b)) return `<div class="ad-note">${esc(note)}</div>`;
+  const blocks = [];
+  if (b.avg !== null) {
+    blocks.push(`<div class="bs-line"><span class="bs-k">均值</span>`
+      + `<b class="bs-v ${cls(b.avg)}">${pct(b.avg)}</b></div>`);
+  }
+  const cells = [];
+  if (b.worst) {
+    cells.push(`<div class="bs-cell"><span class="bs-k">领跌</span>`
+      + `<span class="bs-n">${esc(b.worst.name)}</span>`
+      + `<b class="bs-v ${cls(b.worst.pct)}">${pct(b.worst.pct)}</b></div>`);
+  }
+  if (b.best) {
+    cells.push(`<div class="bs-cell"><span class="bs-k">领涨</span>`
+      + `<span class="bs-n">${esc(b.best.name)}</span>`
+      + `<b class="bs-v ${cls(b.best.pct)}">${pct(b.best.pct)}</b></div>`);
+  }
+  if (cells.length) blocks.push(`<div class="bs-grid">${cells.join('')}</div>`);
+  const secOf = (label, arr) => arr.length
+    ? `<div class="bs-line bs-secline"><span class="bs-k">${label}</span>`
+      + arr.map((x) => `<span class="bs-n">${esc(x.name)}</span>`
+        + `<b class="bs-v ${cls(x.pct)}">${pct(x.pct)}</b>`).join('')
+      + '</div>'
+    : '';
+  const sec = secOf('板块领涨', b.lead) + secOf('板块领跌', b.lag);
+  if (sec) blocks.push(`<div class="bs-sec-block">${sec}</div>`);
+  return `<div class="brief-sum">${blocks.join('')}</div>`;
+}
+
 /** 详情：汇总类渲染成带色带的结构化列表；单条渲染成大数字 + 原文 */
 function renderAlertDetail(a) {
   const p = parseAlert(a);
@@ -992,7 +1072,11 @@ function renderAlertDetail(a) {
         </div>
         <div class="ad-meta">共 ${p.rows.length} 项${flat ? ` · ${flat} 平` : ''} · ${esc(time)}</div>
       </div>
-      ${(p.notes && p.notes.length) ? `<div class="ad-note">${esc(p.notes.join(' · '))}</div>` : ''}
+      ${(p.notes && p.notes.length)
+        ? (a.kind === 'intraday_brief'
+          ? briefSummaryHTML(p.notes.join(' · '))
+          : `<div class="ad-note">${esc(p.notes.join(' · '))}</div>`)
+        : ''}
       <p class="ad-sec">按涨跌幅排序</p>
       <div class="q-list${lg}">
         ${sorted.map((r) => `
@@ -1071,7 +1155,7 @@ function showAlertPop(a, delay) {
         <span class="pop-time">${(a.trigger_time || '').slice(11, 16)}</span>
       </div>
       <div class="pop-lead">${lead}</div>
-      <div class="pop-sub">${sub}</div>
+      <div class="pop-sub${a.kind === 'intraday_brief' ? ' pop-sub-brief' : ''}">${sub}</div>
     </div>
     <button class="pop-close" aria-label="关闭提醒">×</button>`;
   el.addEventListener('click', (ev) => {
