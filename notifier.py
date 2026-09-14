@@ -60,6 +60,14 @@ def send_email(ec, title, content):
     return True
 
 
+# 消息在 FCM 的存活时间。pywebpush 默认 ttl=0，而 TTL=0 的语义是
+# "只在线投递，设备当下连不上就直接丢弃"。
+# 安卓手机进 Doze / 切网 / 被厂商省电策略压制时，到 FCM 的长连接是断的，
+# 于是消息被静默扔掉 —— 后端却因为 FCM 返回 2xx 而记成"已发送"。
+# 这正是"服务器全绿、手机没动静"的根因之一。给 24 小时，让离线也能补投。
+PUSH_TTL = 86400
+
+
 def send_webpush(subs, title, content):
     """给一组 push 订阅推送系统通知，
     返回 {'sent': n, 'failed': n, 'gone': [endpoints], 'errors': [{'endpoint','error'}]}
@@ -67,6 +75,9 @@ def send_webpush(subs, title, content):
     410 Gone / 404 表示客户端已取消订阅，调用方应删除这些记录。
     401/403 表示该订阅不是用当前 VAPID 密钥创建的（密钥轮换/测试残留），
     永远推不通，同样删掉，避免每次发送都留下一条"失败"。
+
+    注意 sent 的语义：它只表示 FCM **接受入队**（HTTP 2xx），
+    不代表手机收到了。真正的送达证据是订阅表的 last_ack_at（SW 回执）。
     """
     import vapid
     from pywebpush import webpush
@@ -75,7 +86,6 @@ def send_webpush(subs, title, content):
     # 否则走 Vapid.from_string() —— 那个函数只认 base64url 密钥，喂 PEM 必然报错。
     signer = vapid.get_vapid_signer()
     claims = vapid.get_vapid_claims()
-    payload = json.dumps({'title': title, 'body': content}, ensure_ascii=False)
     sent = failed = 0
     gone = []
     errors = []
@@ -85,12 +95,20 @@ def send_webpush(subs, title, content):
             'endpoint': ep,
             'keys': {'p256dh': s['p256dh'], 'auth': s['auth']},
         }
+        # 每条订阅单独构造 payload：带上订阅 id，Service Worker 收到后回执，
+        # 这样后台才能区分"FCM 收了"和"手机真弹了"。
+        payload = json.dumps(
+            {'title': title, 'body': content, 'sid': s.get('id')}, ensure_ascii=False)
         try:
             r = webpush(
                 subscription_info=sub_info,
                 data=payload,
                 vapid_private_key=signer,
                 vapid_claims=claims,
+                ttl=PUSH_TTL,
+                # Urgency: high → FCM 走高优先级通道立即投递，
+                # 不因设备 Doze 排队等待（默认 normal 会被攒到设备唤醒）
+                headers={'Urgency': 'high'},
                 timeout=10,
             )
             if r.status_code in (200, 201):

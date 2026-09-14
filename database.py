@@ -232,7 +232,9 @@ _SQLITE_DDL = [
         endpoint TEXT UNIQUE NOT NULL,
         p256dh TEXT,
         auth TEXT,
-        created_at TEXT
+        created_at TEXT,
+        ua TEXT,
+        last_ack_at TEXT
     )''',
 ]
 
@@ -244,10 +246,29 @@ _PG_DDL = [s.replace('INTEGER PRIMARY KEY AUTOINCREMENT',
            for s in _SQLITE_DDL]
 
 
+def _migrate_push_subs(conn):
+    """CREATE TABLE IF NOT EXISTS 只建新表，不会给已存在的表加列。
+    push_subscriptions 后加的 ua / last_ack_at 必须显式 ALTER，
+    否则老库（Neon 上的线上库）永远缺这两列。
+    """
+    if USE_PG:
+        for col in ('ua', 'last_ack_at'):
+            conn.execute(
+                'ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS %s TEXT' % col)
+    else:
+        have = {r['name'] for r in
+                conn.execute('PRAGMA table_info(push_subscriptions)').fetchall()}
+        for col in ('ua', 'last_ack_at'):
+            if col not in have:
+                conn.execute(
+                    'ALTER TABLE push_subscriptions ADD COLUMN %s TEXT' % col)
+
+
 def init_db():
     conn = get_conn()
     for ddl in (_PG_DDL if USE_PG else _SQLITE_DDL):
         conn.execute(ddl)
+    _migrate_push_subs(conn)
     conn.commit()
     conn.close()
 
@@ -290,22 +311,40 @@ def get_subs():
     return [dict(r) for r in rows]
 
 
-def save_sub(endpoint, p256dh, auth):
-    """插入或更新一条 push 订阅（按 endpoint 去重）"""
+def save_sub(endpoint, p256dh, auth, ua=None):
+    """插入或更新一条 push 订阅（按 endpoint 去重）
+
+    ua 只是诊断用：两条订阅的推送域名都是 fcm.googleapis.com，光看 host
+    分不出哪条是手机、哪条是电脑（你无法据此判断"手机到底订阅上没有"）。
+    """
     import datetime
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     conn = get_conn()
     if USE_PG:
         conn.execute(
-            "INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at) "
-            "VALUES (%s,%s,%s,%s) ON CONFLICT (endpoint) DO UPDATE SET "
-            "p256dh=EXCLUDED.p256dh, auth=EXCLUDED.auth",
-            (endpoint, p256dh, auth, now))
+            "INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, ua) "
+            "VALUES (%s,%s,%s,%s,%s) ON CONFLICT (endpoint) DO UPDATE SET "
+            "p256dh=EXCLUDED.p256dh, auth=EXCLUDED.auth, ua=EXCLUDED.ua",
+            (endpoint, p256dh, auth, now, ua))
     else:
         conn.execute(
             "INSERT OR REPLACE INTO push_subscriptions "
-            "(endpoint, p256dh, auth, created_at) VALUES (?,?,?,?)",
-            (endpoint, p256dh, auth, now))
+            "(endpoint, p256dh, auth, created_at, ua) VALUES (?,?,?,?,?)",
+            (endpoint, p256dh, auth, now, ua))
+    conn.commit()
+    conn.close()
+
+
+def ack_sub(sub_id):
+    """记录"Service Worker 真的收到并弹出了这条通知"的时间。
+
+    这是唯一能回答"到底送没送到"的信号：FCM 的 2xx 只代表消息入队，
+    不代表设备收到。SW 收到 push 并成功 showNotification 后回调这里。
+    """
+    import datetime
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_conn()
+    conn.execute('UPDATE push_subscriptions SET last_ack_at=? WHERE id=?', (now, sub_id))
     conn.commit()
     conn.close()
 

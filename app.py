@@ -956,8 +956,21 @@ def api_subscribe():
     auth = keys.get('auth', '')
     if not endpoint:
         return jsonify({'error': '缺少 endpoint'}), 400
-    database.save_sub(endpoint, p256dh, auth)
-    return jsonify({'ok': True})
+    ua = (request.headers.get('User-Agent') or '')[:200]
+    database.save_sub(endpoint, p256dh, auth, ua=ua)
+    # 订阅成功立刻给这一台发一条验证推送：既能立刻确认链路通不通，
+    # 也是一次送达回执（SW 收到后会回写 last_ack_at）。
+    welcome = None
+    try:
+        mine = [s for s in database.get_subs() if s.get('endpoint') == endpoint]
+        if mine:
+            w = notifier.send_webpush(
+                mine, '基金涨跌监控 · 推送已开启',
+                '本设备已成功订阅。基金触发预警时会弹这条通知，网页关闭也能收到。')
+            welcome = {'sent': w['sent'], 'failed': w['failed'], 'errors': w['errors']}
+    except Exception as e:
+        welcome = {'error': '%s: %s' % (type(e).__name__, str(e)[:150])}
+    return jsonify({'ok': True, 'welcome': welcome})
 
 
 @app.route('/api/unsubscribe', methods=['POST'])
@@ -983,14 +996,34 @@ def api_push_status():
             host = ep.split('/')[2]
         except Exception:
             host = '?'
-        items.append({'host': host, 'tail': ep[-10:], 'created_at': s.get('created_at')})
+        # ua 用来区分手机/电脑；last_ack_at 是唯一可信的"送达"证据
+        items.append({'host': host, 'tail': ep[-10:], 'created_at': s.get('created_at'),
+                      'ua': s.get('ua') or '', 'last_ack_at': s.get('last_ack_at')})
     return jsonify({'count': len(subs), 'items': items})
+
+
+@app.route('/api/push_ack', methods=['POST'])
+def api_push_ack():
+    """Service Worker 收到 push 并成功弹出通知后回调这里。
+
+    这是"到底送没送到"的唯一硬证据：FCM 返回 2xx 只代表消息入队。
+    没有回执 = 手机侧从未收到（网络断开 / 进程被杀 / 通知被系统拦）。
+    """
+    data = request.get_json(silent=True) or {}
+    sid = data.get('sid')
+    if not sid:
+        return jsonify({'error': '缺少 sid'}), 400
+    try:
+        database.ack_sub(int(sid))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'sid 非法'}), 400
+    return jsonify({'ok': True})
 
 
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.9', 'commit': 'icon-kline'})
+    return jsonify({'version': '3.10', 'commit': 'push-ttl-ack'})
 
 
 @app.route('/api/db_diag')

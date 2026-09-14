@@ -1,6 +1,6 @@
 // Service Worker：Web Push 系统通知 + 基础离线缓存
 // 换图标/换样式后记得把 CACHE 版本号 +1，否则旧缓存会继续被用
-const CACHE = 'fund-monitor-v2';
+const CACHE = 'fund-monitor-v3';
 const ASSETS = [
   '/',
   '/static/style.css',
@@ -52,17 +52,30 @@ self.addEventListener('push', (e) => {
   } catch (err) {
     if (e.data) data.body = e.data.text();
   }
-  e.waitUntil(
-    self.registration.showNotification(data.title || '基金涨跌监控', {
+  e.waitUntil((async () => {
+    await self.registration.showNotification(data.title || '基金涨跌监控', {
       body: data.body || '',
       icon: '/static/icons/icon-192.png?v=2',
       badge: '/static/icons/icon-192.png?v=2',
-      tag: 'fund-alert',
+      // 用独立 tag：固定 tag 会被系统"原地替换"上一条，
+      // 部分 ROM 在替换时不发声也不震动，看起来就像"没收到通知"。
+      tag: 'fund-alert-' + (data.sid || Date.now()),
       renotify: true,
       vibrate: [80, 40, 80],
       data: { url: '/' },
-    })
-  );
+    });
+    // 回执：通知确实弹出来了才告诉后端。
+    // FCM 的 2xx 只代表"消息入队"，不代表送到手机——只有这里跑到了才算送达。
+    if (data.sid) {
+      try {
+        await fetch('/api/push_ack', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sid: data.sid }),
+        });
+      } catch (err) { /* 回执失败不影响通知本身 */ }
+    }
+  })());
 });
 
 // 点击通知：聚焦已有窗口或打开新窗口

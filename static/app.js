@@ -761,6 +761,26 @@ async function unsubscribePush() {
   });
 }
 
+/**
+ * 填充推送诊断信息。
+ * 关键认知：后端 `sent` 只代表 FCM 接收入队，**不代表手机收到了**。
+ * 只有 /api/push_status 的 last_ack_at 才是"设备真的收到并弹出"的证据。
+ */
+async function showPushDiag(endpoint) {
+  const status = $('#push-status');
+  let info;
+  try { info = await api('/api/push_status'); } catch (e) { return; }
+  const items = info.items || [];
+  const me = items.find((it) => endpoint && endpoint.slice(-10) === it.tail);
+  const parts = [`已订阅 ${info.count} 台设备`];
+  if (me) {
+    parts.push(me.last_ack_at
+      ? `本设备最近送达 ${me.last_ack_at.slice(5, 16)}`
+      : '本设备尚无送达回执（点「发送测试提醒」验证）');
+  }
+  status.textContent = parts.join(' · ');
+}
+
 async function initPush() {
   const toggle = $('#cf-push');
   const badge = $('#push-badge');
@@ -786,6 +806,7 @@ async function initPush() {
       badge.textContent = '已订阅';
       badge.classList.add('on');
       status.textContent = '本设备已开启推送，网页关闭也能收到通知';
+      showPushDiag(sub.endpoint);
     } else {
       status.textContent = Notification.permission === 'granted'
         ? '通知权限已允许，打开开关即可订阅'
@@ -824,11 +845,13 @@ $('#cf-push').addEventListener('change', async (e) => {
         }
       }
       saying('正在订阅推送…');
-      await subscribePush(saying);
+      const newSub = await subscribePush(saying);
       badge.textContent = '已订阅';
       badge.classList.add('on');
-      status.textContent = '本设备已开启推送，网页关闭也能收到通知';
+      status.textContent = '已开启。正在向本机发一条验证推送，请留意系统通知栏…';
       toast('推送已开启');
+      // 稍等一下让 SW 回执落库，再显示"本设备最近送达"的真实时间
+      setTimeout(() => showPushDiag(newSub.endpoint), 4000);
     } else {
       saying('正在取消订阅…');
       await unsubscribePush();
