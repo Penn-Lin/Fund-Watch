@@ -145,13 +145,32 @@ def fetch_history(code, days=30, retries=2):
     return []
 
 
+def _quote_date(raw):
+    """从腾讯行情的时间字段解析出 YYYY-MM-DD（静态数据判新鲜度用）
+
+    A 股格式 '20260914133727'，港股格式 '2026/09/14 13:22:28'，
+    格式不统一 → 统一"抽数字"，前 8 位即年月日。解析不出返回 None。
+    """
+    if not raw:
+        return None
+    digits = ''.join(c for c in str(raw) if c.isdigit())
+    if len(digits) < 8:
+        return None
+    return '%s-%s-%s' % (digits[:4], digits[4:6], digits[6:8])
+
+
 def fetch_indices(max_age=60.0):
     """抓取指数实时行情（腾讯 qt.gtimg.cn 接口，腾讯全球 CDN 海外可达性好）
 
     腾讯返回格式 v_xxx="字段~分隔..."；关键字段位（A 股/港/美一致）：
-      [1]名称 [2]代码 [3]当前价 [4]昨收 [5]今开 [31]涨跌额 [32]涨跌幅% [33]最高 [34]最低
+      [1]名称 [2]代码 [3]当前价 [4]昨收 [5]今开 [30]行情时间
+      [31]涨跌额 [32]涨跌幅% [33]最高 [34]最低
     返回：[{'secid','code','name','price','change_pct','change_amt',
-            'open','pre_close','high','low'}, ...]
+            'open','pre_close','high','low','quote_time','quote_date'}, ...]
+
+    quote_date 很重要：收盘后/周末/节假日接口返回的是**上一个交易日**的
+    收盘值，change_pct 仍是旧值。调用方必须用它判断"这份行情是不是今天的"，
+    否则半夜日期翻页后，旧行情会被当成当日行情重新触发一遍提醒。
     """
     now = time.time()
     if _index_cache['data'] and now - _index_cache['ts'] < max_age:
@@ -187,6 +206,8 @@ def fetch_indices(max_age=60.0):
                 'pre_close': _f(parts[4]),
                 'high': _f(parts[33]),
                 'low': _f(parts[34]),
+                'quote_time': parts[30],
+                'quote_date': _quote_date(parts[30]),
             })
         if out:
             _index_cache.update(ts=now, data=out)

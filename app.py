@@ -269,6 +269,11 @@ def _build_index_summary_message():
     indices = fund_data.fetch_indices(max_age=120)
     if not indices:
         return None, 0
+    # is_trading_day 只挡周末、挡不住节假日：节假日接口返回的是上一交易日的
+    # 收官数据。用行情自带日期兜底——没有任何一条是今天的，就不是收盘汇总。
+    today = rule_engine.today_str()
+    if not any((ix.get('quote_date') or '') == today for ix in indices):
+        return None, 0
     lines = []
     for ix in indices:
         chg = ix.get('change_pct')
@@ -397,13 +402,26 @@ def maybe_send_us_index_summary():
 
 
 def maybe_eval_indices():
-    """指数涨跌幅超阈值即时推送（每指数每方向每日一次去重）"""
+    """指数涨跌幅超阈值即时推送（每指数每方向每日一次去重）
+
+    必须只在「当日行情」上判定，否则会出两个 bug（2026-09-14 修）：
+    ① 收盘后/周末/节假日，接口返回的是上一个交易日的收盘值，change_pct 还是旧值；
+       而 0 点日期一翻页，去重键（trigger_time LIKE '今天%'）就重置了，
+       于是旧行情被当成"今天的行情"重新推一遍 —— 用户半夜收到一堆重复提醒。
+    ② 更严重的是去重被这一次误触发占掉，当天真正跌破阈值时**不会再提醒**。
+    """
     cfg = load_config()
     ia = cfg.get('index_alert') or {}
     if not ia.get('enabled'):
         return 0
     threshold = float(ia.get('threshold') or 3)
     if threshold <= 0:
+        return 0
+    # 不用"几点之前不算"这种时间闸门：A 股 09:25 集合竞价就出开盘价，
+    # 09:26 是合法的当日行情（今天 09:26 那条创业板指提醒就是这么来的）。
+    # 只靠行情自带日期判断新鲜度，两头都不会误伤。
+    now = rule_engine.now()
+    if not rule_engine.is_trading_day(now):
         return 0
     indices = fund_data.fetch_indices(max_age=60)
     if not indices:
@@ -413,6 +431,11 @@ def maybe_eval_indices():
     for ix in indices:
         if (ix.get('secid') or '').startswith('us'):
             continue  # 美股指数改走早上汇总，不参与盘中实时阈值提醒
+        # 行情日期必须是今天。fail-closed：取不到日期也视为不新鲜——
+        # 宁可漏一次，也不要在 0 点把上一交易日的收官数据当今日行情推一遍
+        # （那种误触发还会占掉去重名额，让当天真正的下跌提醒发不出来）。
+        if (ix.get('quote_date') or '') != today:
+            continue
         chg = ix.get('change_pct')
         if chg is None:
             continue
@@ -1023,7 +1046,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.10', 'commit': 'push-ttl-ack'})
+    return jsonify({'version': '3.11', 'commit': 'index-fresh'})
 
 
 @app.route('/api/db_diag')
