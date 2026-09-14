@@ -514,11 +514,11 @@ def _intraday_cfg(cfg):
 
 
 def _index_panel():
-    """快报用的指数面板：**只取 A 股核心指数**的当日行情
+    """快报用的指数面板：A 股核心指数 + 恒生指数/恒生科技（剔除美股）
 
-    港股/美股不进：快报是"看看今天大盘怎么样"，混进恒生会让均值失去意义
-    （港股和 A 股经常反向）。港股/美股由 17:00 的指数收盘汇总覆盖。
-    返回 (rows, avg)，avg = 等权平均。
+    美股不进：北京时间白天美股没交易，放进均值只是噪音；美股由早上 08:00
+    的昨夜收盘汇总覆盖。
+    返回 (rows, avg)，rows=[{'name','change_pct','price'}]，avg = 等权平均。
     """
     indices = fund_data.fetch_indices(max_age=60)
     if not indices:
@@ -526,8 +526,7 @@ def _index_panel():
     today = rule_engine.today_str()
     rows = []
     for ix in indices:
-        secid = ix.get('secid') or ''
-        if not secid.startswith(('sh', 'sz')):
+        if (ix.get('secid') or '').startswith('us'):
             continue
         # 行情日期不是今天的就不进面板（节假日/接口滞后）
         if (ix.get('quote_date') or '') != today:
@@ -535,29 +534,41 @@ def _index_panel():
         chg = ix.get('change_pct')
         if chg is None:
             continue
-        rows.append({'name': ix['name'], 'change_pct': chg})
+        rows.append({'name': ix['name'], 'change_pct': chg, 'price': ix.get('price')})
     if not rows:
         return [], None
     return rows, sum(r['change_pct'] for r in rows) / len(rows)
 
 
-def _build_intraday_line(slot, rows, avg):
-    """快报正文 —— 刻意只有一行：时间 · 大盘 · 几跌几涨 · 领跌领涨
+def _build_intraday_message(slot, rows, avg, sectors):
+    """快报正文：逐项列出指数 + 一行总结（含板块），没有多余的话
 
-    不放全量指数明细：这是"快速了解"用的，重点比完整重要。
-    大盘均值另由 alert.current_change 携带，前端会把它渲染成大字。
+    格式约束（与前端 parseSummaryLine / parseAlert 强耦合）：
+    · 第 1 行是标题
+    · 中间每行必须是 `· 名称 涨跌%，数值`，前端才会渲染成带色带的列表
+    · **最后一个非 `·` 开头的行会被前端当"补充说明"**（notes），
+      展示在浮层副文案和详情页里 —— 总结就放这里
     """
-    down = sum(1 for r in rows if r['change_pct'] < 0)
-    up = sum(1 for r in rows if r['change_pct'] > 0)
-    parts = [slot, '大盘 %s%.2f%%' % ('+' if avg > 0 else '', avg),
-             '%d 跌 %d 涨' % (down, up)]
+    lines = ['📊 盘中快报 %s' % slot]
+    for r in rows:
+        sign = '+' if r['change_pct'] > 0 else ''
+        price = ('%.2f' % r['price']) if r.get('price') else '—'
+        lines.append('· %s %s%.2f%%，%s' % (r['name'], sign, r['change_pct'], price))
+
     worst = min(rows, key=lambda r: r['change_pct'])
     best = max(rows, key=lambda r: r['change_pct'])
+    parts = ['均值 %s%.2f%%' % ('+' if avg > 0 else '', avg)]
     if worst['change_pct'] < 0:
         parts.append('领跌 %s %.2f%%' % (worst['name'], worst['change_pct']))
     if best['change_pct'] > 0:
         parts.append('领涨 %s +%.2f%%' % (best['name'], best['change_pct']))
-    return ' · '.join(parts)
+    lead_sec, lag_sec = sectors or ([], [])
+    if lead_sec:
+        parts.append('板块领涨 ' + '、'.join('%s %+.2f%%' % s for s in lead_sec))
+    if lag_sec:
+        parts.append('板块领跌 ' + '、'.join('%s %.2f%%' % s for s in lag_sec))
+    lines.append(' · '.join(parts))
+    return '\n'.join(lines)
 
 
 def _log_intraday_alert(code, name, kind, avg, msg, result):
@@ -610,10 +621,11 @@ def maybe_send_intraday_brief():
     if not rows:
         return 0
 
-    line = _build_intraday_line(due, rows, avg)
-    result = notifier.send_alert(cfg, '基金监控 · 盘中快报', line)
+    sectors = fund_data.fetch_sectors(2)
+    msg = _build_intraday_message(due, rows, avg, sectors)
+    result = notifier.send_alert(cfg, '基金监控 · 盘中快报', msg)
     database.intraday_mark(today, 'slot', due, avg)
-    _log_intraday_alert('IX_BRIEF', '盘中快报', 'intraday_brief', avg, line, result)
+    _log_intraday_alert('IX_BRIEF', '盘中快报', 'intraday_brief', avg, msg, result)
     return 1
 
 
@@ -1054,6 +1066,25 @@ def api_summary():
     })
 
 
+@app.route('/api/alerts/<int:aid>', methods=['DELETE'])
+def api_delete_alert(aid):
+    """删除一条监控记录（用于清掉误报/无用记录）
+
+    先 SELECT 判断存在性：PgConn.execute 返回的是包装对象、没有 rowcount，
+    SQLite 才有，靠 rowcount 判断会在 PG 上永远返回 ok。
+    """
+    conn = database.get_conn()
+    try:
+        row = conn.execute('SELECT id FROM alert_log WHERE id=?', (aid,)).fetchone()
+        if not row:
+            return jsonify({'error': '记录不存在'}), 404
+        conn.execute('DELETE FROM alert_log WHERE id=?', (aid,))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({'ok': True, 'id': aid})
+
+
 # ------------------------- 配置 -------------------------
 
 @app.route('/api/config', methods=['GET', 'POST'])
@@ -1205,7 +1236,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.12', 'commit': 'intraday-brief'})
+    return jsonify({'version': '3.13', 'commit': 'brief-v2'})
 
 
 @app.route('/api/db_diag')

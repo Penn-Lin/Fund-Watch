@@ -895,7 +895,7 @@ let _alertsCache = [];
 // 汇总类消息的数据行长这样：
 //   · 上证指数 -1.18%，3888.11
 //   · 易方达瑞享混合E(001438) +0.58%，净值 9.6893（2026-09-11）
-const SUMMARY_KINDS = ['daily_summary', 'index_summary', 'us_index_summary'];
+const SUMMARY_KINDS = ['daily_summary', 'index_summary', 'us_index_summary', 'intraday_brief'];
 
 function parseSummaryLine(line) {
   const m = String(line).match(/^·\s*(.+?)\s*([+-]?\d+(?:\.\d+)?)%，\s*(.*)$/);
@@ -906,8 +906,12 @@ function parseSummaryLine(line) {
 function parseAlert(a) {
   const lines = String(a.message || '').split('\n').filter((s) => s.trim());
   if (SUMMARY_KINDS.includes(a.kind)) {
-    const rows = lines.slice(1).map(parseSummaryLine).filter(Boolean);
-    if (rows.length) return { type: 'list', header: lines[0] || '', rows };
+    const body = lines.slice(1);
+    const rows = body.map(parseSummaryLine).filter(Boolean);
+    // 非数据行的补充说明（如盘中快报末尾的"均值/领跌/板块"那行）。
+    // 不单独收集的话会被 filter 掉，在 App 里彻底看不到。
+    const notes = body.filter((s) => !parseSummaryLine(s));
+    if (rows.length) return { type: 'list', header: lines[0] || '', rows, notes };
   }
   return { type: 'text', header: lines[0] || '' };
 }
@@ -927,6 +931,9 @@ function alertParts(a) {
     const worst = sorted[0];
     const best = sorted[sorted.length - 1];
     const lead = `<b class="down">${down}</b> 跌 · <b class="up">${up}</b> 涨`;
+    // 有补充说明（快报的"均值/领跌/板块"）就直接用它当副文案——那是后端算好的总结，
+    // 比前端拼的"共 N 项 · 最深…"信息更全；没有则退回原来的拼法（收盘汇总等仍走这条）
+    if (p.notes && p.notes.length) return { lead, sub: esc(p.notes.join(' · ')) };
     let sub = `共 ${p.rows.length} 项`;
     if (worst.pct < 0) sub += ` · 最深 ${esc(worst.name)} <b class="down">${pct(worst.pct)}</b>`;
     if (best.pct > 0) sub += ` · 最强 ${esc(best.name)} <b class="up">${pct(best.pct)}</b>`;
@@ -972,13 +979,22 @@ function renderAlertDetail(a) {
     // 色带以 3% 为满格基准；当天若波动更大则按最大值归一，保证条与条之间可比
     const scale = Math.max(3, ...p.rows.map((r) => Math.abs(r.pct)));
     const sorted = p.rows.slice().sort((x, y) => x.pct - y.pct);
+    const total = p.rows.length || 1;
+    // 盘中快报把色带加粗，读起来更像柱状图
+    const lg = a.kind === 'intraday_brief' ? ' bars-lg' : '';
     return `
       <div class="ad-stats">
         <div class="ad-lead"><b class="down">${down}</b> 跌 · <b class="up">${up}</b> 涨</div>
+        <div class="ad-split" aria-hidden="true">
+          <i class="up" style="width:${(up / total * 100).toFixed(1)}%"></i>
+          <i class="flat" style="width:${(flat / total * 100).toFixed(1)}%"></i>
+          <i class="down" style="width:${(down / total * 100).toFixed(1)}%"></i>
+        </div>
         <div class="ad-meta">共 ${p.rows.length} 项${flat ? ` · ${flat} 平` : ''} · ${esc(time)}</div>
       </div>
+      ${(p.notes && p.notes.length) ? `<div class="ad-note">${esc(p.notes.join(' · '))}</div>` : ''}
       <p class="ad-sec">按涨跌幅排序</p>
-      <div class="q-list">
+      <div class="q-list${lg}">
         ${sorted.map((r) => `
           <div class="q-row">
             <div>

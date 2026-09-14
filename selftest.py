@@ -139,13 +139,24 @@ assert app_mod._intraday_cfg({'intraday_brief': {'enabled': True}})['enabled'] i
 assert app_mod._intraday_cfg(
     {'intraday_brief': {'slots': '09:35，11:30 , 14:30, 99:99'}})['slots'] \
     == ['09:35', '11:30', '14:30'], '脏时点应被过滤/归一'
-line = app_mod._build_intraday_line(
-    '09:35', [{'name': '上证指数', 'change_pct': -1.2},
-              {'name': '深证成指', 'change_pct': 0.4}], -0.4)
-assert '\n' not in line, '快报必须只有一行'
-assert line.startswith('09:35') and '大盘 -0.40%' in line
-assert '领跌 上证指数' in line and '领涨 深证成指' in line
-assert not line.startswith('·'), '不能以 · 开头，否则前端会当汇总数据行解析'
-print('[7/7] 盘中快报纯函数 OK → %s' % line)
+ROWS = [{'name': '上证指数', 'change_pct': -1.2, 'price': 3888.11},
+        {'name': '恒生科技', 'change_pct': 0.4, 'price': 4320.57}]
+msg = app_mod._build_intraday_message(
+    '09:35', ROWS, -0.4, ([('医疗服务', 3.98)], [('种植业', -4.03)]))
+lines = msg.split('\n')
+assert lines[0].startswith('📊 盘中快报 09:35'), '第一行必须是标题'
+body = lines[1:-1]
+assert len(body) == len(ROWS), '每个指数一行'
+assert all(l.startswith('· ') and '%，' in l for l in body), \
+    '数据行必须是 `· 名称 涨跌%，数值`，前端 parseSummaryLine 靠它解析'
+note = lines[-1]
+assert not note.startswith('·'), '总结行不能以 · 开头，否则会被前端当数据行'
+assert '均值 -0.40%' in note and '领跌 上证指数' in note and '领涨 恒生科技' in note
+assert '板块领涨 医疗服务' in note and '板块领跌 种植业' in note
+# 板块接口挂掉时必须仍能出快报（降级为空列表）
+msg2 = app_mod._build_intraday_message('11:30', ROWS, -0.4, ([], []))
+# 标题 + 每个指数一行 + 总结一行
+assert '板块' not in msg2 and msg2.count('\n') == len(ROWS) + 1, msg2
+print('[7/7] 盘中快报纯函数 OK →\n%s' % msg)
 
 print('\n全部自测通过 ✓ （云端真实连接建议拿到 Neon 连接串后再跑一次冒烟测试）')
