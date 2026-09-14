@@ -629,9 +629,17 @@ def maybe_send_intraday_brief():
     return 1
 
 
+# 调度线程的自述状态：线程一死，盘中快报/各类定时汇总就全都不再触发，
+# 而表面上（cron 仍在打 /api/refresh）一切"正常"，极难发现 → 必须能自证还活着。
+_sched_state = {'cycle': 0, 'started_at': None, 'last_cycle_at': None,
+                'last_cycle_ms': None, 'last_error': None}
+
+
 def scheduler_loop():
+    _sched_state['started_at'] = rule_engine.now_str()
     while True:
         cycle_ok = True
+        t_cycle = time.time()
         # 确保表存在（幂等；Neon compute 恢复后自动补建）。
         # 不能依赖模块级 init_db 成功——它可能因 Neon 冷启动失败。
         try:
@@ -670,6 +678,9 @@ def scheduler_loop():
         except Exception as e:
             print('us index summary error:', e)
             cycle_ok = False
+        _sched_state['cycle'] += 1
+        _sched_state['last_cycle_at'] = rule_engine.now_str()
+        _sched_state['last_cycle_ms'] = int((time.time() - t_cycle) * 1000)
         # 失败时快速重试（Neon 冷启动/网络抖动后能自愈），成功时按配置间隔
         try:
             time.sleep(60 if not cycle_ok else _interval())
@@ -1249,7 +1260,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.17', 'commit': 'thread-diag'})
+    return jsonify({'version': '3.18', 'commit': 'sched-health'})
 
 
 @app.route('/api/threads')
@@ -1270,7 +1281,14 @@ def api_threads():
         if fr is not None:
             stack = [ln.strip() for ln in traceback.format_stack(fr)[-8:]]
         items.append({'name': th.name, 'daemon': th.daemon, 'stack': stack})
-    return jsonify({'count': len(items), 'threads': items})
+    return jsonify({
+        'count': len(items),
+        # 调度线程死了 = 盘中快报和所有定时汇总都不会再触发（而 cron 仍在打
+        # /api/refresh，表面看不出问题），所以单独给出一个明确信号
+        'scheduler_alive': bool(_sched_thread and _sched_thread.is_alive()),
+        'scheduler': _sched_state,
+        'threads': items,
+    })
 
 
 @app.route('/api/db_diag')
@@ -1289,6 +1307,7 @@ def api_db_diag():
 
 _scheduler_started = False
 _scheduler_lock = threading.Lock()
+_sched_thread = None
 
 
 def start_scheduler():
@@ -1298,7 +1317,11 @@ def start_scheduler():
         if _scheduler_started:
             return
         _scheduler_started = True
-        threading.Thread(target=scheduler_loop, daemon=True).start()
+        global _sched_thread
+        # 起个名字，方便在 /api/threads 的线程栈里一眼认出来
+        _sched_thread = threading.Thread(target=scheduler_loop, daemon=True,
+                                         name='fund-scheduler')
+        _sched_thread.start()
 
 
 # 后台初始化：不阻塞 app 启动。Neon 冷启动时 init_db 可能卡住，若在

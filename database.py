@@ -284,15 +284,30 @@ _migrated = False
 
 
 def init_db():
+    """建表 + 迁移。
+
+    两个必须遵守的点（2026-09-14 实例卡死后复盘）：
+    1. `conn.close()` 必须放 finally。之前没有 try/finally，一旦 execute 抛异常
+       （比如 ALTER 等锁超时），连接就永远不关 —— 而 PgConn.execute 超时是
+       "抛异常但子线程仍持连接在跑"，那条连接可能正握着
+       push_subscriptions 的 ACCESS EXCLUSIVE 锁，于是后续所有读写该表的事务
+       全部排队，Neon 连接池被耗尽，**整个实例失去响应（连静态文件都超时）**。
+    2. 迁移失败不能拖垮 init_db：建表已经成功，功能可用，迁移下轮再试。
+    """
     global _migrated
     conn = get_conn()
-    for ddl in (_PG_DDL if USE_PG else _SQLITE_DDL):
-        conn.execute(ddl)
-    if not _migrated:
-        _migrate_push_subs(conn)
-        _migrated = True          # 只有真正跑成功才置位，失败留给下一轮重试
-    conn.commit()
-    conn.close()
+    try:
+        for ddl in (_PG_DDL if USE_PG else _SQLITE_DDL):
+            conn.execute(ddl)
+        if not _migrated:
+            try:
+                _migrate_push_subs(conn)
+                _migrated = True    # 只有真正跑成功才置位，失败留给下一轮重试
+            except Exception as e:
+                print('push_subscriptions 迁移失败（下一轮重试）:', e)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ------------------------- 配置存取（入库，防实例重启丢失） -------------------------
