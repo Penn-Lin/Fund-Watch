@@ -1040,6 +1040,38 @@ def api_indices():
         return jsonify([])
 
 
+@app.route('/api/index_history')
+def api_index_history():
+    """指数走势（日K + 当日分时），供详情抽屉画图
+
+    纯展示用途：失败不抛 500 给前端，而是带着 errors 字段返回可用部分，
+    让前端能"有什么画什么"。secid 必须白名单命中，否则 400。
+    """
+    secid = request.args.get('secid', '')
+    try:
+        days = int(request.args.get('days', 300))
+    except (TypeError, ValueError):
+        days = 300
+    try:
+        return jsonify(fund_data.fetch_index_history(secid, days=days))
+    except ValueError as e:
+        return jsonify({'error': str(e), 'allowed': sorted(fund_data.ALLOWED_SECIDS)}), 400
+    except Exception as e:
+        return jsonify({'error': '走势数据获取失败：%s' % e}), 500
+
+
+@app.route('/api/index_probe')
+def api_index_probe():
+    """诊断：逐个列出指数走势数据源的原始结果与错误（同 /api/sector_probe 的路子）"""
+    secid = request.args.get('secid')
+    try:
+        if secid:
+            return jsonify(fund_data.probe_index(secid))
+        return jsonify([fund_data.probe_index(s) for s in sorted(fund_data.ALLOWED_SECIDS)])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/summary')
 def api_summary():
     today = rule_engine.today_str()
@@ -1260,7 +1292,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.20', 'commit': 'sched-owner'})
+    return jsonify({'version': '3.21', 'commit': 'index-detail'})
 
 
 @app.route('/api/threads')

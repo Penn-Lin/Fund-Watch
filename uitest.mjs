@@ -26,9 +26,11 @@ function grabConst(name) {
   return src.slice(i, src.indexOf('\n', i));
 }
 
-const code = ['esc', 'pct', 'cls', 'parseBriefNote', 'briefSubHTML', 'briefSummaryHTML']
+const code = ['esc', 'pct', 'cls', 'parseBriefNote', 'briefSubHTML', 'briefSummaryHTML',
+  'num', 'fmtHM', 'fmtQuoteTime', 'fmtAmount', 'rangePos', 'periodPct', 'ixZoneText']
   .map(grab).join('\n') + '\n' + grabConst('briefEmpty');
-const M = new Function(code + '\nreturn {esc,pct,cls,parseBriefNote,briefSubHTML,briefSummaryHTML};')();
+const M = new Function(code + '\nreturn {esc,pct,cls,parseBriefNote,briefSubHTML,briefSummaryHTML,'
+  + 'num,fmtHM,fmtQuoteTime,fmtAmount,rangePos,periodPct,ixZoneText};')();
 
 const fail = [];
 function ok(label, cond, extra) {
@@ -68,6 +70,31 @@ ok('无板块时仍能解析', b2.avg === -0.54 && b2.lead.length === 0 && b2.la
 ok('无板块时紧凑版只有一行', (M.briefSubHTML(NOTE_NOSEC).match(/bn-row/g) || []).length === 1);
 ok('无法解析时紧凑版退回原文', M.briefSubHTML(JUNK) === M.esc(JUNK));
 ok('无法解析时详情版退回 ad-note', M.briefSummaryHTML(JUNK).includes('ad-note'));
+
+// ---- 5. 指数详情页的数值格式化 / 位置计算 ----
+// 这几条是详情页排版的地基：时间格式化错位会把 09:30 显示成 930，
+// 区间位置算错则会让"现价点"跑到轨道外面去。
+ok('分时时刻补零', M.fmtHM(930) === '09:30' && M.fmtHM(1500) === '15:00', M.fmtHM(930));
+ok('分时时刻单个数字', M.fmtHM(5) === '00:05', M.fmtHM(5));
+ok('A股行情时间戳', M.fmtQuoteTime('20260918161402') === '2026-09-18 16:14',
+  M.fmtQuoteTime('20260918161402'));
+ok('港股行情时间戳', M.fmtQuoteTime('2026/09/18 18:31:31') === '2026-09-18 18:31',
+  M.fmtQuoteTime('2026/09/18 18:31:31'));
+ok('成交额按亿展示', M.fmtAmount(994169450166) === '9941.69 亿', M.fmtAmount(994169450166));
+ok('成交额按万亿展示', M.fmtAmount(2500000000000).includes('万亿'), M.fmtAmount(2500000000000));
+ok('成交额缺省值', M.fmtAmount(null) === '—' && M.fmtAmount(0) === '—');
+
+const pos = M.rangePos(3911.87, 3888.5, 3919.67);
+ok('区间位置计算', pos > 74 && pos < 75, String(pos));
+ok('区间位置越界夹紧', M.rangePos(9999, 10, 20) === 100 && M.rangePos(-5, 10, 20) === 0);
+ok('区间位置数据缺失返回 null', M.rangePos(null, 10, 20) === null && M.rangePos(15, 20, 10) === null);
+ok('区间分位文案', M.ixZoneText(90) === '接近上沿' && M.ixZoneText(50) === '居中'
+  && M.ixZoneText(5) === '接近下沿' && M.ixZoneText(null) === '');
+
+// 日K 只取到 6 根时，"近 20 日 / 近一年"必须返回 null 而不是硬算出一个假的区间涨幅
+const kl6 = [100, 101, 102, 103, 104, 105].map((c, i) => ({ date: '2026-09-0' + (i + 1), close: c }));
+ok('近5日涨跌幅', Math.abs(M.periodPct(kl6, 5) - 5) < 1e-9, String(M.periodPct(kl6, 5)));
+ok('历史不足时不编造长周期', M.periodPct(kl6, 20) === null && M.periodPct(kl6, 250) === null);
 
 console.log(fail.length ? '\n失败 ' + fail.length + ' 项: ' + fail.join(' / ') : '\n前端回归全部通过');
 process.exit(fail.length ? 1 : 0);

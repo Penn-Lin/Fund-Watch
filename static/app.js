@@ -77,6 +77,11 @@ async function loadIndices() {
   try {
     _indices = await api('/api/indices');
     renderIndices();
+    // 指数详情抽屉若开着，跟着刷新实时数字（不重拉历史图：图只跟 min 级变化）
+    if (_ixState && $('#ix-sheet').classList.contains('show')) {
+      const nx = _indices.find((x) => x.secid === _ixState.ix.secid);
+      if (nx) { _ixState.ix = nx; $('#ix-detail').innerHTML = ixDetailHTML(); }
+    }
   } catch (e) { /* 静默，保留上次数据 */ }
 }
 
@@ -94,32 +99,392 @@ function renderIndices() {
     </button>`).join('');
 }
 
+/* ---------------- 指数详情（行情 + 走势图） ----------------
+ *
+ * 信息层级（重要度自上而下，这是这块代码唯一的设计目标）：
+ *   1. 涨跌幅 + 点位          → 唯一的主信息，大字 + 涨跌色
+ *   2. 走势图（分时 / 30 日）  → 主视觉，当天有分时数据时默认展示分时
+ *   3. 区间位置条             → 「现价处在什么位置」：今日区间 / 近一年区间
+ *   4. 今开 / 昨收 / 最高 / 最低 → 常规数值，只有相对昨收才有意义的才上色
+ *   5. 振幅 / 成交额          → 盘面特性，统一琥珀色，与涨跌红绿彻底分开
+ *   6. 近 5 日 / 20 日 / 一年  → 时间维度对比，数值仍用涨跌色
+ *
+ * 颜色只承担三件事：涨红跌绿（值）、琥珀（特性）、其余全是中性灰阶。
+ * 千万不要把所有格子都涂成同一个颜色——那就又回到「一眼看不出重点」了。
+ */
+let _ixState = null;        // { ix, data, mode }
+const _ixHistCache = {};    // secid -> { ts, data }
+
+function fmtHM(t) {
+  const n = Number(t);
+  if (!isFinite(n) || n < 0) return '';
+  const h = Math.floor(n / 100), m = n % 100;
+  return (h < 10 ? '0' + h : '' + h) + ':' + (m < 10 ? '0' + m : '' + m);
+}
+
+/** 行情时间戳统一：A股 '20260918161402'、港/美 '2026/09/18 18:31:31' → '2026-09-18 16:14' */
+function fmtQuoteTime(raw) {
+  const d = String(raw == null ? '' : raw).replace(/\D/g, '');
+  if (d.length < 12) return '';
+  return d.slice(0, 4) + '-' + d.slice(4, 6) + '-' + d.slice(6, 8) +
+    ' ' + d.slice(8, 10) + ':' + d.slice(10, 12);
+}
+
+/** 成交额（元）→ 亿 / 万亿 */
+function fmtAmount(v) {
+  if (v === null || v === undefined || !isFinite(v) || v <= 0) return '—';
+  if (v >= 1e12) return (v / 1e12).toFixed(2) + ' 万亿';
+  if (v >= 1e8) return (v / 1e8).toFixed(2) + ' 亿';
+  return (v / 1e4).toFixed(0) + ' 万';
+}
+
+/** 当前值在 [low, high] 中的位置（0~100，越界夹紧；数据不全返回 null） */
+function rangePos(cur, low, high) {
+  const ok = [cur, low, high].every((x) => typeof x === 'number' && isFinite(x));
+  if (!ok || high <= low) return null;
+  return Math.max(0, Math.min(100, (cur - low) / (high - low) * 100));
+}
+
+/** N 个交易日前的收盘到最新的涨跌幅；历史不够 N 天时返回 null（不编造"近一年"） */
+function periodPct(rows, n) {
+  if (!rows || rows.length < n + 1 || n < 1) return null;
+  const last = rows[rows.length - 1].close;
+  const base = rows[rows.length - 1 - n].close;
+  if (!base) return null;
+  return (last - base) / base * 100;
+}
+
+function ixZoneText(pos) {
+  if (pos === null) return '';
+  if (pos >= 80) return '接近上沿';
+  if (pos >= 60) return '偏上';
+  if (pos >= 40) return '居中';
+  if (pos >= 20) return '偏下';
+  return '接近下沿';
+}
+
+function ixHeroHTML(ix) {
+  const c = cls(ix.change_pct);
+  const amt = (ix.change_amt === null || ix.change_amt === undefined)
+    ? '' : (ix.change_amt > 0 ? '+' : '') + num(ix.change_amt);
+  return `
+  <div class="ixs-hero">
+    <div class="ixs-hero-l">
+      <div class="ixs-name">${esc(ix.name)}<span class="ixs-secid">${esc(ix.secid)}</span></div>
+      <div class="ixs-price">${num(ix.price)}</div>
+      <div class="ixs-time">${esc(fmtQuoteTime(ix.quote_time))} 行情</div>
+    </div>
+    <div class="ixs-hero-r">
+      <div class="ixs-big ${c}">${pct(ix.change_pct)}</div>
+      <div class="ixs-chg-amt ${c}">${amt}</div>
+    </div>
+  </div>`;
+}
+
+/** 区间位置条：灰轨 + 中性填充 + 涨跌色焦点，右侧标注现价所处分位 */
+function ixRangeHTML(title, low, high, cur, chg, unit) {
+  const pos = rangePos(cur, low, high);
+  const p = pos === null ? 50 : pos;
+  const bits = unit ? [unit] : [];
+  if (low && cur && high) {
+    bits.push('距最高 ' + pct((cur - high) / high * 100));
+    bits.push('距最低 ' + pct((cur - low) / low * 100));
+  }
+  return `
+  <div class="ixs-block">
+    <div class="ixs-block-h">
+      <span>${esc(title)}</span>
+      <span class="ixs-zone">${ixZoneText(pos)}</span>
+    </div>
+    <div class="ixs-range">
+      <i class="ixs-range-track"></i>
+      <i class="ixs-range-fill" style="width:${p.toFixed(1)}%"></i>
+      <i class="ixs-range-dot ${cls(chg)}" style="left:${p.toFixed(1)}%"></i>
+    </div>
+    <div class="ixs-legend">
+      <span>最低 <b>${num(low)}</b></span>
+      <span class="ixs-now">现价 <b class="${cls(chg)}">${num(cur)}</b></span>
+      <span>最高 <b>${num(high)}</b></span>
+    </div>
+    <div class="ixs-range-meta">${bits.join(' · ')}</div>
+  </div>`;
+}
+
+function ixStatsHTML(ix) {
+  const rel = (v) => ((v === null || v === undefined || !ix.pre_close) ? 'flat' : cls(v - ix.pre_close));
+  const cell = (k, v, c) =>
+    `<div class="ixs-cell"><span class="k">${k}</span><b class="v ${c || ''}">${num(v)}</b></div>`;
+  return `
+  <div class="ixs-grid">
+    ${cell('今开', ix.open, rel(ix.open))}
+    ${cell('昨收', ix.pre_close, '')}
+    ${cell('最高', ix.high, rel(ix.high))}
+    ${cell('最低', ix.low, rel(ix.low))}
+  </div>`;
+}
+
+function ixFactsHTML(ix) {
+  const items = [];
+  if (ix.amplitude !== null && ix.amplitude !== undefined) {
+    items.push(`<div class="ixs-fact"><span class="k">振幅</span>`
+      + `<b class="v">${Number(ix.amplitude).toFixed(2)}%</b></div>`);
+  }
+  if (ix.amount) {
+    items.push(`<div class="ixs-fact"><span class="k">成交额</span>`
+      + `<b class="v">${fmtAmount(ix.amount)}</b></div>`);
+  }
+  if (!items.length) return '';
+  return `<div class="ixs-facts">${items.join('')}</div>`;
+}
+
+function ixPeriodHTML(kl) {
+  if (!kl || kl.length < 6) return '';
+  const cells = [];
+  [['近 5 日', 5], ['近 20 日', 20], ['近一年', 250]].forEach((pair) => {
+    const v = periodPct(kl, pair[1]);
+    if (v === null) return;
+    cells.push(`<div class="ixs-period"><span class="k">${pair[0]}</span>`
+      + `<b class="v ${cls(v)}">${pct(v)}</b></div>`);
+  });
+  if (!cells.length) return '';
+  return `<div class="ixs-periods">${cells.join('')}</div>`;
+}
+
+/** 日K 走势（尾 30 根收盘线）：面积渐变 + 起点基准虚线 + 期间最高/最低点标注 */
+function ixDaySVG(rows) {
+  if (!rows || rows.length < 2) return `<div class="ixs-empty">暂无走势数据</div>`;
+  const W = 460, H = 168, PL = 8, PR = 12, PT = 18, PB = 22;
+  const vals = rows.map((r) => r.close);
+  let lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+  if (hi - lo < 1e-9) { lo -= 0.01; hi += 0.01; }
+  const pad = (hi - lo) * 0.16;
+  const ymin = lo - pad, ymax = hi + pad;
+  const X = (i) => PL + i / (rows.length - 1) * (W - PL - PR);
+  const Y = (v) => PT + (ymax - v) / (ymax - ymin) * (H - PT - PB);
+  const first = vals[0], last = vals[vals.length - 1];
+  const chg = (last - first) / first * 100;
+  const color = chg >= 0 ? '#e0342f' : '#0a9d5c';
+  const pts = vals.map((v, i) => X(i).toFixed(1) + ',' + Y(v).toFixed(1)).join(' ');
+  const area = PL + ',' + Y(first).toFixed(1) + ' ' + pts + ' '
+    + (W - PR) + ',' + Y(first).toFixed(1);
+  const hiI = vals.indexOf(Math.max.apply(null, vals));
+  const loI = vals.indexOf(Math.min.apply(null, vals));
+  const dot = (i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(vals[i]).toFixed(1)}" r="3"`
+    + ` fill="${color}" stroke="#fff" stroke-width="1.3"/>`;
+  const yFirst = Y(first).toFixed(1);
+  // 图内文字一律加描边：折线随时可能穿过标签，白描边保证任何位置都读得清
+  const textOut = ' paint-order="stroke" stroke="#fafbfc" stroke-width="3" stroke-linejoin="round"';
+  return `
+  <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="近 30 日走势">
+    <defs>
+      <linearGradient id="ixdg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${color}" stop-opacity=".2"/>
+        <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <polygon points="${area}" fill="url(#ixdg)"/>
+    <line x1="${PL}" y1="${yFirst}" x2="${W - PR}" y2="${yFirst}"
+      stroke="#c8cdd6" stroke-width="1" stroke-dasharray="4 4"/>
+    <text x="${W - PR - 2}" y="${Number(yFirst) - 4}" font-size="9" fill="#9ca3af"
+      text-anchor="end"${textOut}>30 日前 ${num(first)}</text>
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.8"
+      stroke-linejoin="round" stroke-linecap="round"/>
+    ${dot(hiI)}${dot(loI)}
+    <circle cx="${X(vals.length - 1).toFixed(1)}" cy="${Y(last).toFixed(1)}" r="3.6"
+      fill="${color}" stroke="#fff" stroke-width="1.6"/>
+    <text x="${X(hiI).toFixed(1)}" y="${(Y(vals[hiI]) - 7).toFixed(1)}" font-size="9"
+      fill="${color}" text-anchor="middle"${textOut}>${num(vals[hiI])}</text>
+    <text x="${X(loI).toFixed(1)}" y="${(Y(vals[loI]) + 13).toFixed(1)}" font-size="9"
+      fill="${color}" text-anchor="middle"${textOut}>${num(vals[loI])}</text>
+    <text x="${PL}" y="${H - 6}" font-size="9" fill="#9ca3af">${esc(rows[0].date.slice(5))}</text>
+    <text x="${W - PR}" y="${H - 6}" font-size="9" fill="#9ca3af" text-anchor="end">${esc(rows[rows.length - 1].date.slice(5))}</text>
+  </svg>`;
+}
+
+/** 分时图：以昨收为对称轴（涨跌幅视觉等宽），上下分别用红/绿填充，右侧标偏离幅度 */
+function ixMinuteSVG(rows, preClose) {
+  if (!rows || rows.length < 2 || !preClose) return `<div class="ixs-empty">暂无分时数据</div>`;
+  const W = 460, H = 168, PL = 8, PR = 52, PT = 16, PB = 22;
+  const vals = rows.map((r) => r[1]);
+  const spread = Math.max.apply(null,
+    [preClose * 0.002].concat(vals.map((v) => Math.abs(v - preClose))));
+  const ymax = preClose + spread * 1.12, ymin = preClose - spread * 1.12;
+  const X = (i) => PL + i / (rows.length - 1) * (W - PL - PR);
+  const Y = (v) => PT + (ymax - v) / (ymax - ymin) * (H - PT - PB);
+  const ypc = Y(preClose);
+  const last = vals[vals.length - 1];
+  const dev = (v) => (v - preClose) / preClose * 100;
+  const color = dev(last) >= 0 ? '#e0342f' : '#0a9d5c';
+  const line = rows.map((r, i) => X(i).toFixed(1) + ',' + Y(r[1]).toFixed(1)).join(' ');
+  const area = X(0).toFixed(1) + ',' + ypc.toFixed(1) + ' ' + line + ' '
+    + X(rows.length - 1).toFixed(1) + ',' + ypc.toFixed(1);
+  const hiI = vals.indexOf(Math.max.apply(null, vals));
+  const loI = vals.indexOf(Math.min.apply(null, vals));
+  const midI = Math.floor((rows.length - 1) / 2);
+  const dotOf = (i) => {
+    const c = dev(vals[i]) >= 0 ? '#e0342f' : '#0a9d5c';
+    return `<circle cx="${X(i).toFixed(1)}" cy="${Y(vals[i]).toFixed(1)}" r="3"`
+      + ` fill="${c}" stroke="#fff" stroke-width="1.3"/>`;
+  };
+  const axisText = (i) => (i >= 0 && rows[i]) ? fmtHM(rows[i][0]) : '';
+  const textOut = ' paint-order="stroke" stroke="#fafbfc" stroke-width="3" stroke-linejoin="round"';
+  return `
+  <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="当日分时走势">
+    <defs>
+      <clipPath id="ixmu"><rect x="0" y="0" width="${W}" height="${ypc.toFixed(1)}"/></clipPath>
+      <clipPath id="ixmd"><rect x="0" y="${ypc.toFixed(1)}" width="${W}" height="${(H - ypc).toFixed(1)}"/></clipPath>
+    </defs>
+    <polygon points="${area}" fill="#e0342f" opacity=".16" clip-path="url(#ixmu)"/>
+    <polygon points="${area}" fill="#0a9d5c" opacity=".16" clip-path="url(#ixmd)"/>
+    <line x1="${PL}" y1="${ypc.toFixed(1)}" x2="${W - PR}" y2="${ypc.toFixed(1)}"
+      stroke="#c8cdd6" stroke-width="1" stroke-dasharray="4 4"/>
+    <polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.6"
+      stroke-linejoin="round" stroke-linecap="round"/>
+    ${dotOf(hiI)}${dotOf(loI)}
+    <circle cx="${X(vals.length - 1).toFixed(1)}" cy="${Y(last).toFixed(1)}" r="3.6"
+      fill="${color}" stroke="#fff" stroke-width="1.6"/>
+    <text x="${W - PR - 2}" y="${(Number(ypc) - 4).toFixed(1)}" font-size="9" fill="#9ca3af"
+      text-anchor="end"${textOut}>昨收 ${num(preClose)}</text>
+    <text x="${W - PR + 4}" y="${PT + 3}" font-size="9" fill="#e0342f">+${(spread * 1.12 / preClose * 100).toFixed(2)}%</text>
+    <text x="${W - PR + 4}" y="${(Number(ypc) + 3).toFixed(1)}" font-size="9" fill="#9ca3af">0.00%</text>
+    <text x="${W - PR + 4}" y="${H - PB}" font-size="9" fill="#0a9d5c">-${(spread * 1.12 / preClose * 100).toFixed(2)}%</text>
+    <text x="${PL}" y="${H - 6}" font-size="9" fill="#9ca3af">${axisText(0)}</text>
+    <text x="${X(midI).toFixed(1)}" y="${H - 6}" font-size="9" fill="#9ca3af"
+      text-anchor="middle">${axisText(midI)}</text>
+    <text x="${W - PR}" y="${H - 6}" font-size="9" fill="#9ca3af"
+      text-anchor="end">${axisText(rows.length - 1)}</text>
+  </svg>`;
+}
+
+function ixChartHTML() {
+  const st = _ixState;
+  if (!st) return '';
+  const d = st.data;
+  if (!d) return `<div class="ixs-chart"><div class="ixs-empty">走势加载中…</div></div>`;
+  const kl = d.kline || [];
+  const mp = (d.minute && d.minute.rows) || [];
+  const mdate = (d.minute && d.minute.date) || '';
+  const hasMinute = mp.length >= 2 && !!mdate;
+  const mode = st.mode;
+  let stat = '', inner = '';
+  if (mode === 'minute' && hasMinute) {
+    const chg = dev0(mp[mp.length - 1][1], st.ix.pre_close);
+    stat = `${esc(mdate.slice(5))} 全天 <b class="${cls(chg)}">${pct(chg)}</b>`;
+    inner = ixMinuteSVG(mp, st.ix.pre_close);
+  } else if (kl.length >= 2) {
+    const rows = kl.slice(-30);
+    const chg = (rows[rows.length - 1].close - rows[0].close) / rows[0].close * 100;
+    stat = `${esc(rows[0].date.slice(5))} ~ ${esc(rows[rows.length - 1].date.slice(5))}`
+      + ` <b class="${cls(chg)}">${pct(chg)}</b>`;
+    inner = ixDaySVG(rows);
+  } else {
+    inner = `<div class="ixs-empty">该指数暂无走势数据</div>`;
+  }
+  const seg = `<div class="ixs-seg">`
+    + `<button data-ixmode="minute"${mode === 'minute' ? ' class="on"' : ''}`
+    + `${hasMinute ? '' : ' disabled'}>分时</button>`
+    + `<button data-ixmode="day"${mode === 'day' ? ' class="on"' : ''}`
+    + `${kl.length >= 2 ? '' : ' disabled'}>30 日</button></div>`;
+  return `
+  <div class="ixs-chart">
+    <div class="ixs-chart-head">${seg}<div class="ixs-chart-stat">${stat}</div></div>
+    ${inner}
+  </div>`;
+}
+
+function dev0(v, base) {
+  if (v === null || v === undefined || !base) return null;
+  return (v - base) / base * 100;
+}
+
+function todayStr() {
+  const n = new Date();
+  const p = (x) => (x < 10 ? '0' + x : '' + x);
+  return n.getFullYear() + '-' + p(n.getMonth() + 1) + '-' + p(n.getDate());
+}
+
+/** 分时数据是今天的（说明今天开过盘）就默认看分时，否则看 30 日 */
+function pickIxMode(d) {
+  const mp = d && d.minute;
+  if (mp && mp.date && mp.date === todayStr() && mp.rows && mp.rows.length >= 2) return 'minute';
+  return 'day';
+}
+
+function ixDetailHTML() {
+  const st = _ixState;
+  if (!st) return '';
+  const ix = st.ix;
+  const d = st.data;
+  const kl = (d && d.kline) || [];
+  const out = [ixHeroHTML(ix), ixChartHTML()];
+  if (ix.low !== null && ix.low !== undefined && ix.high !== null && ix.high !== undefined) {
+    out.push(ixRangeHTML('今日区间', ix.low, ix.high, ix.price, ix.change_pct, '当日高低'));
+  }
+  if (kl.length >= 60) {
+    // 近一年区间 = 尾 250 根（约一年交易日）。请求时多拿了一些冗余，
+    // 这里必须自己切窗口，否则"近一年"会随请求天数漂移
+    const yr = kl.slice(-250);
+    let lo = Infinity, hi = -Infinity;
+    yr.forEach((r) => {
+      if (r.low !== null && r.low !== undefined && r.low < lo) lo = r.low;
+      if (r.high !== null && r.high !== undefined && r.high > hi) hi = r.high;
+    });
+    if (isFinite(lo) && isFinite(hi) && hi > lo) {
+      out.push(ixRangeHTML('近一年区间', lo, hi, ix.price, ix.change_pct,
+        yr.length + ' 个交易日高低'));
+    }
+  }
+  out.push(ixStatsHTML(ix));
+  out.push(ixFactsHTML(ix));
+  out.push(ixPeriodHTML(kl));
+  if (d && d.errors && (d.errors.kline || d.errors.minute)) {
+    const errs = [];
+    if (d.errors.kline) errs.push('日K ' + d.errors.kline);
+    if (d.errors.minute) errs.push('分时 ' + d.errors.minute);
+    out.push(`<div class="ixs-err">${esc(errs.join('；'))}</div>`);
+  }
+  return out.join('');
+}
+
+async function openIxDetail(ix) {
+  const hit = _ixHistCache[ix.secid];
+  const cached = hit && (Date.now() - hit.ts < 60000);
+  _ixState = { ix, data: hit ? hit.data : null, mode: 'day' };
+  if (_ixState.data) _ixState.mode = pickIxMode(_ixState.data);
+  $('#ix-detail').innerHTML = ixDetailHTML();
+  $('#ix-mask').classList.add('show');
+  $('#ix-sheet').classList.add('show');
+  if (cached) return;   // 60 秒内的缓存直接用，不重复打接口
+  try {
+    const d = await api('/api/index_history?secid=' + encodeURIComponent(ix.secid) + '&days=300');
+    _ixHistCache[ix.secid] = { ts: Date.now(), data: d };
+    if (!_ixState || _ixState.ix.secid !== ix.secid) return;   // 期间切到别的指数了
+    if (!_ixState.data) { _ixState.data = d; _ixState.mode = pickIxMode(d); }
+    else { _ixState.data = d; }
+    $('#ix-detail').innerHTML = ixDetailHTML();
+  } catch (e) {
+    if (!_ixState || _ixState.ix.secid !== ix.secid) return;
+    if (_ixState.data) return;   // 已有图就不覆盖成错误态
+    _ixState.data = { kline: [], minute: { date: '', rows: [] },
+      errors: { kline: e.message, minute: '' } };
+    $('#ix-detail').innerHTML = ixDetailHTML();
+  }
+}
+
 $('#index-strip').addEventListener('click', (e) => {
   const card = e.target.closest('.ix-card');
   if (!card) return;
   const ix = _indices[+card.dataset.ix];
   if (!ix) return;
-  const rows = [
-    ['今开', num(ix.open)], ['昨收', num(ix.pre_close)],
-    ['最高', num(ix.high)], ['最低', num(ix.low)],
-    ['涨跌额', (ix.change_amt > 0 ? '+' : '') + num(ix.change_amt)],
-  ];
-  $('#ix-detail').innerHTML = `
-    <div class="ix-sheet-head">
-      <div>
-        <div class="ix-sheet-name">${esc(ix.name)}</div>
-        <div class="ix-sheet-code">${esc(ix.code)}</div>
-      </div>
-      <div class="ix-sheet-num">
-        <div class="big ${cls(ix.change_pct)}">${pct(ix.change_pct)}</div>
-        <div class="sub ${cls(ix.change_pct)}">${num(ix.price)}</div>
-      </div>
-    </div>
-    <div class="ix-sheet-grid">
-      ${rows.map(([k, v]) => `<div class="cell"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}
-    </div>`;
-  $('#ix-mask').classList.add('show');
-  $('#ix-sheet').classList.add('show');
+  openIxDetail(ix);
+});
+
+$('#ix-detail').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-ixmode]');
+  if (!btn || btn.disabled || !_ixState) return;
+  if (btn.dataset.ixmode === _ixState.mode) return;
+  _ixState.mode = btn.dataset.ixmode;
+  $('#ix-detail').innerHTML = ixDetailHTML();
 });
 
 function closeIxSheet() {

@@ -36,6 +36,10 @@ INDEX_LIST = [
 
 _index_cache = {'ts': 0.0, 'data': []}
 
+# 允许查询走势的指数白名单（secid 会拼进第三方 URL，必须白名单，不能直接透传参数）
+ALLOWED_SECIDS = frozenset(s for s, _ in INDEX_LIST)
+NAME_BY_SECID = dict(INDEX_LIST)
+
 _last_request = 0.0
 _throttle_lock = threading.Lock()
 MIN_INTERVAL = 5.0
@@ -264,6 +268,29 @@ def _quote_date(raw):
     return '%s-%s-%s' % (digits[:4], digits[4:6], digits[6:8])
 
 
+def _index_extra(secid, parts):
+    """腾讯 qt 的附加字段。跨市场字段位**不统一**，只取有把握的两个：
+
+    [37] 成交额（万元）—— 仅 A 股口径正确（港股/美股该位是原始数字，无意义）
+    [48]/[49] 52 周最高/最低 —— 仅港/美有值；A 股这两位是 -1 和 1.02 之类的垃圾
+
+    其余位（换手、均价）在指数上语义混乱，一律不取，避免把错数据展示给用户。
+    """
+    out = {'amount': None, 'week52_high': None, 'week52_low': None}
+    if secid.startswith(('sh', 'sz')):
+        if len(parts) > 37:
+            a = _f(parts[37])
+            if a is not None and a > 0:
+                out['amount'] = a * 1e4          # 万元 → 元
+    elif secid.startswith(('hk', 'us')):
+        hi = _f(parts[48]) if len(parts) > 48 else None
+        lo = _f(parts[49]) if len(parts) > 49 else None
+        if hi and lo and hi > lo:
+            out['week52_high'] = hi
+            out['week52_low'] = lo
+    return out
+
+
 def fetch_indices(max_age=60.0):
     """抓取指数实时行情（腾讯 qt.gtimg.cn 接口，腾讯全球 CDN 海外可达性好）
 
@@ -302,20 +329,194 @@ def fetch_indices(max_age=60.0):
             price = _f(parts[3])
             if price is None:
                 continue
+            pre_close = _f(parts[4])
+            high = _f(parts[33])
+            low = _f(parts[34])
+            # 振幅自算而不取字段位：[43] 在 A/港/美都是振幅，但口径随市场浮动，
+            # 用 (高-低)/昨收 自己算，公式统一、也便于在详情页解释
+            amp = None
+            if high is not None and low is not None and pre_close:
+                amp = (high - low) / pre_close * 100.0
             out.append({
                 'secid': key, 'code': parts[2], 'name': name,
                 'price': price,
                 'change_pct': _f(parts[32]),
                 'change_amt': _f(parts[31]),
                 'open': _f(parts[5]),
-                'pre_close': _f(parts[4]),
-                'high': _f(parts[33]),
-                'low': _f(parts[34]),
+                'pre_close': pre_close,
+                'high': high,
+                'low': low,
+                'amplitude': amp,
                 'quote_time': parts[30],
                 'quote_date': _quote_date(parts[30]),
+                **_index_extra(key, parts),
             })
         if out:
             _index_cache.update(ts=now, data=out)
         return out
     except Exception:
         return list(_index_cache['data'])
+
+
+# ============ 指数走势（日K + 当日分时） ============
+#
+# 数据源选择：仍走腾讯（web.ifzq.gtimg.cn），和 qt.gtimg.cn 同属腾讯行情 CDN，
+# 海外可达性好。东财 push2his 虽然本机实测能通，但它和板块用的 push2 是同一套
+# CDN，在 Render 海外机房会 502，所以不启用。
+#
+# 这两个接口都**不参与预警**，纯展示用，失败一律降级为空数据 + 错误文本，
+# 绝不能让"图没画出来"影响到指数提醒本身。
+#
+# 注意：不走模块级 _throttle()——那个节流是给东财（有风控）用的，
+# 这里一次请求要等 5 秒反而会拖慢用户点开抽屉的体验。自带内存缓存即可。
+
+INDEX_KLINE_URL = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get'
+INDEX_MINUTE_URL = 'https://web.ifzq.gtimg.cn/appstock/app/minute/query'
+
+_kline_cache = {}    # secid -> {'ts': float, 'rows': [...]}
+_minute_cache = {}   # secid -> {'ts': float, 'date': str, 'rows': [...]}
+KLINE_TTL = 300.0    # 日K 5 分钟（当日最后一根盘中会变，5 分钟粒度够）
+MINUTE_TTL = 60.0    # 分时跟随首页 60 秒刷新节奏
+_CACHE_MAX = 24      # 白名单只有 8 个指数，24 是冗余上限，防内存意外膨胀
+_KLINE_DAYS = 300    # 固定按 300 个交易日拉取并缓存，调用方要多少自己切
+                     # （缓存键里不带 days，否则 30 天和 300 天的请求会互相污染）
+
+
+def _cache_put(cache, key, val):
+    """写入并做一次裁剪：超上限时丢掉 ts 最小的条目（够用的简易 LRU）"""
+    cache[key] = val
+    if len(cache) > _CACHE_MAX:
+        stale = sorted(cache, key=lambda k: cache[k].get('ts', 0))
+        for k in stale[:len(cache) - _CACHE_MAX]:
+            cache.pop(k, None)
+
+
+def _norm_secid(secid):
+    s = str(secid or '').strip()
+    return s if s in ALLOWED_SECIDS else None
+
+
+def _tail(rows, n):
+    try:
+        n = max(5, min(int(n), _KLINE_DAYS))
+    except (TypeError, ValueError):
+        n = _KLINE_DAYS
+    return rows[-n:] if n < len(rows) else rows
+
+
+def fetch_index_kline(secid, days=_KLINE_DAYS, force=False):
+    """指数日K（按日期升序）
+
+    返回 (rows, err)，rows = [{'date','open','close','high','low'}, ...]
+    内部固定拉 300 个交易日再按 days 切尾——图只画最近 30 天，但同一份数据
+    还要用来算近 5/20/250 日和"近一年区间"。**必须比 250 多**，否则前端算
+    250 日涨幅时没有 251 根可用（这个坑踩过一次）。
+    失败时返回上次缓存（可能为空）+ 错误文本，不抛异常。
+    """
+    s = _norm_secid(secid)
+    if not s:
+        return [], '未知的指数代码 %r' % (secid,)
+    hit = _kline_cache.get(s) or {}
+    now = time.time()
+    if hit.get('rows') and not force and now - hit.get('ts', 0) < KLINE_TTL:
+        return _tail(hit['rows'], days), None
+    try:
+        url = '%s?param=%s,day,,,%d,qfq' % (INDEX_KLINE_URL, s, _KLINE_DAYS)
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        j = r.json()
+        d = (j.get('data') or {}).get(s) or {}
+        raw = d.get('qfqday') or d.get('day') or []
+        rows = []
+        for x in raw:
+            if not isinstance(x, (list, tuple)) or len(x) < 5:
+                continue
+            close = _f(x[2])
+            if close is None:
+                continue
+            # 元素顺序固定为 [日期, 开, 收, 高, 低, 量]（已实测确认，别按直觉写成 开收高低）
+            rows.append({
+                'date': str(x[0]), 'open': _f(x[1]), 'close': close,
+                'high': _f(x[3]), 'low': _f(x[4]),
+            })
+        if rows:
+            _cache_put(_kline_cache, s, {'ts': now, 'rows': rows})
+            return _tail(rows, days), None
+        # 空数据（美股指数在这接口只有 1 条）→ 保留旧缓存，附带原因
+        return _tail(hit.get('rows') or [], days), '接口无日K数据（code=%s）' % j.get('code')
+    except Exception as e:
+        return _tail(hit.get('rows') or [], days), '日K请求失败：%s' % e
+
+
+def fetch_index_minute(secid, force=False):
+    """当日分时（每 1 分钟一个点）
+
+    返回 (date, rows, err)：date 形如 '2026-09-18'（**不是**今天时说明是
+    上一交易日的分时——周末/节假日接口仍返回最近一个交易日的完整分时，
+    前端据此决定默认展示"分时"还是"日K"），rows = [[HHMM 整数, 价格], ...]
+    """
+    s = _norm_secid(secid)
+    if not s:
+        return '', [], '未知的指数代码 %r' % (secid,)
+    hit = _minute_cache.get(s) or {}
+    now = time.time()
+    if hit.get('rows') and not force and now - hit.get('ts', 0) < MINUTE_TTL:
+        return hit.get('date') or '', hit['rows'], None
+    try:
+        r = requests.get(INDEX_MINUTE_URL + '?code=' + s, headers=HEADERS, timeout=8)
+        j = r.json()
+        d = (j.get('data') or {}).get(s) or {}
+        inner = d.get('data') or {}
+        raw_date = str(inner.get('date') or '')
+        iso = ('%s-%s-%s' % (raw_date[:4], raw_date[4:6], raw_date[6:8])
+               if len(raw_date) >= 8 and raw_date[:8].isdigit() else '')
+        rows = []
+        for row in (inner.get('data') or []):
+            p = str(row).split()
+            if len(p) < 2 or len(p[0]) != 4 or not p[0].isdigit():
+                continue
+            v = _f(p[1])
+            if v is None:
+                continue
+            rows.append([int(p[0]), v])
+        if rows:
+            _cache_put(_minute_cache, s, {'ts': now, 'date': iso, 'rows': rows})
+            return iso, rows, None
+        return iso or hit.get('date') or '', list(hit.get('rows') or []), '接口无分时数据'
+    except Exception as e:
+        return hit.get('date') or '', list(hit.get('rows') or []), '分时请求失败：%s' % e
+
+
+def fetch_index_history(secid, days=300):
+    """给详情页打包：日K + 分时 + 各自的错误（一次请求返回两个系列）
+
+    结构：
+      {'secid','name','kline':[...], 'minute':{'date','rows'}, 'errors':{'kline','minute'}}
+    kline / minute 任一失败都不影响另一个，前端按"有什么画什么"降级。
+    """
+    s = _norm_secid(secid)
+    if not s:
+        raise ValueError('未知的指数代码：%s' % (secid,))
+    kl, kl_err = fetch_index_kline(s, days=days)
+    mdate, mrows, m_err = fetch_index_minute(s)
+    return {
+        'secid': s,
+        'name': NAME_BY_SECID.get(s, s),
+        'kline': kl,
+        'minute': {'date': mdate, 'rows': mrows},
+        'errors': {'kline': kl_err, 'minute': m_err},
+    }
+
+
+def probe_index(secid, days=30):
+    """诊断用（供 /api/index_probe）：逐项列出原始结果与错误"""
+    s = _norm_secid(secid)
+    if not s:
+        return {'secid': secid, 'error': '不在白名单内', 'allowed': sorted(ALLOWED_SECIDS)}
+    kl, kl_err = fetch_index_kline(s, days=days, force=True)
+    mdate, mrows, m_err = fetch_index_minute(s, force=True)
+    return {
+        'secid': s, 'name': NAME_BY_SECID.get(s, s),
+        'kline_count': len(kl), 'kline_head': kl[:2], 'kline_tail': kl[-2:],
+        'kline_error': kl_err,
+        'minute_date': mdate, 'minute_count': len(mrows), 'minute_error': m_err,
+    }

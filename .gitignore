@@ -12,3 +12,7 @@ config.json
 .cdp_*.py
 .webpush_repro.py
 ui_shot*.png
+ui_ix*.png
+_probe*
+_git_stat.txt
+_cleanup_check.txt
