@@ -1292,7 +1292,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.22', 'commit': 'local-notify-selftest'})
+    return jsonify({'version': '3.23', 'commit': 'selftest-ab'})
 
 
 @app.route('/api/threads')

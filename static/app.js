@@ -1207,15 +1207,28 @@ if (_btnLocalNotify) {
     if (out) { out.hidden = false; out.textContent = '正在调用本地通知接口…'; }
     try {
       const reg = await getSwReg();
-      await reg.showNotification('本地通知自测', {
-        body: '看到这条 = 通知显示正常；收不到推送就与显示层无关。',
+      const stamp = Date.now();
+      // A：只带标题正文，其余全默认
+      await reg.showNotification('自测A 仅文字', {
+        body: '看到 A = 基础显示正常',
+        tag: 'selftest-a-' + stamp,
+      });
+      // B：与真实 push 用的参数逐项一致（sw.js 里 push 分支的那套）
+      await reg.showNotification('自测B 推送同款', {
+        body: '看到 B = 推送参数也没问题，那就是没送到手机',
         icon: '/static/icons/icon-192.png?v=2',
         badge: '/static/icons/icon-192.png?v=2',
-        tag: 'local-selftest-' + Date.now(),
+        tag: 'fund-alert-' + stamp,
+        renotify: true,
+        vibrate: [80, 40, 80],
+        data: { url: '/' },
       });
       if (out) {
-        out.textContent = '接口调用成功、没有报错。屏幕上若毫无提示，说明通知被系统静默了，'
-          + '去系统通知中心找这条「本地通知自测」。';
+        out.textContent = '已连发两条（A 仅文字 / B 与推送参数完全一致），'
+          + '看屏幕或通知中心里出现了哪条：'
+          + '两条都有 → 显示层没问题，是推送没送到手机；'
+          + '只有 A → 就是 B 多出来的某个参数（图标/renotify/振动/tag）导致 Android 不显示；'
+          + '都没有 → 通知被系统静默了。';
       }
     } catch (e) {
       if (out) {
