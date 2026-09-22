@@ -117,6 +117,17 @@ main { padding: 14px 14px 96px; }
 .btn-block { width: 100%; padding: 12px; margin-top: 4px; }
 .btn-col { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
 
+/* 本地通知自测按钮：故意做成"次要操作"的样子（虚线描边 + 小字号），
+   它是诊断入口而不是日常功能，不该和「开启推送」抢注意力 */
+.btn-selftest {
+  width: 100%; margin-top: 10px; padding: 9px;
+  border: 1.5px dashed var(--border); border-radius: 10px;
+  background: transparent; color: var(--text-2);
+  font-size: 12.5px; font-family: inherit; cursor: pointer;
+}
+.btn-selftest:active { background: #f4f5f7; }
+.btn-selftest:disabled { opacity: .5; }
+
 /* ===== 基金卡片 ===== */
 .fund-list { display: flex; flex-direction: column; gap: 12px; }
 .fund-card {

@@ -1190,6 +1190,44 @@ async function initPush() {
   }
 }
 
+/* 本地通知自测：直接在设备上调用 showNotification()，完全不经过网络。
+ *
+ * 为什么需要它：「收不到推送」有两种成因完全不同的情况——
+ *   ① push 根本没送达设备（网络 / GMS / FCM 层）
+ *   ② 送达了，但通知被系统静默（显示层）
+ * 两者在服务端的表现一模一样（都没有 last_ack_at 回执），从后端分不出来。
+ * 这个按钮走纯本地调用：能弹出 ⇒ 显示层没问题，问题在 ①；
+ * 弹不出来 ⇒ 就是 ②，直接去查系统通知权限 / 静默设置。
+ */
+const _btnLocalNotify = $('#btn-local-notify');
+if (_btnLocalNotify) {
+  _btnLocalNotify.addEventListener('click', async () => {
+    const out = $('#selftest-result');
+    _btnLocalNotify.disabled = true;
+    if (out) { out.hidden = false; out.textContent = '正在调用本地通知接口…'; }
+    try {
+      const reg = await getSwReg();
+      await reg.showNotification('本地通知自测', {
+        body: '看到这条 = 通知显示正常；收不到推送就与显示层无关。',
+        icon: '/static/icons/icon-192.png?v=2',
+        badge: '/static/icons/icon-192.png?v=2',
+        tag: 'local-selftest-' + Date.now(),
+      });
+      if (out) {
+        out.textContent = '接口调用成功、没有报错。屏幕上若毫无提示，说明通知被系统静默了，'
+          + '去系统通知中心找这条「本地通知自测」。';
+      }
+    } catch (e) {
+      if (out) {
+        out.textContent = '调用失败：' + ((e && e.message) || e)
+          + ' —— 多半是本站的通知权限被拒绝。';
+      }
+    } finally {
+      _btnLocalNotify.disabled = false;
+    }
+  });
+}
+
 $('#cf-push').addEventListener('change', async (e) => {
   const toggle = e.target;
   const badge = $('#push-badge');
