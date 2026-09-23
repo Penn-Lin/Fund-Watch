@@ -97,8 +97,11 @@ def send_webpush(subs, title, content):
         }
         # 每条订阅单独构造 payload：带上订阅 id，Service Worker 收到后回执，
         # 这样后台才能区分"FCM 收了"和"手机真弹了"。
+        # sent_at：发出时刻（epoch 秒）。设备长连接不常驻时消息会在 FCM 排队，
+        # 重连补投可能是几小时后 —— SW 靠它识别过期消息并标注"补推"。
         payload = json.dumps(
-            {'title': title, 'body': content, 'sid': s.get('id')}, ensure_ascii=False)
+            {'title': title, 'body': content, 'sid': s.get('id'),
+             'sent_at': int(time.time())}, ensure_ascii=False)
         try:
             r = webpush(
                 subscription_info=sub_info,

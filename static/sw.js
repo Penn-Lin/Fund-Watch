@@ -53,7 +53,17 @@ self.addEventListener('push', (e) => {
     if (e.data) data.body = e.data.text();
   }
   e.waitUntil((async () => {
-    await self.registration.showNotification(data.title || '基金涨跌监控', {
+    let title = data.title || '基金涨跌监控';
+    // 补推标注：设备长连接断开期间消息在 FCM 排队（TTL 24h），重连时才补投。
+    // 早上 09:36 的快报下午才弹，时效已失 —— 超过 10 分钟送达的在标题上
+    // 标出"迟到了多久"，避免误以为是刚发生的事。
+    try {
+      const lateSec = data.sent_at ? Date.now() / 1000 - data.sent_at : 0;
+      if (lateSec > 600) {
+        title = '[补推 ' + Math.round(lateSec / 60) + ' 分钟] ' + title;
+      }
+    } catch (err) { /* 标注失败不影响通知本身 */ }
+    await self.registration.showNotification(title, {
       body: data.body || '',
       icon: '/static/icons/icon-192.png?v=2',
       badge: '/static/icons/icon-192.png?v=2',
