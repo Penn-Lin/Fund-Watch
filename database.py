@@ -35,6 +35,12 @@ DEFAULT_CONFIG = {
     'us_index_summary': {'enabled': False, 'time': '08:00'},
 }
 
+# DB 连接熔断：连续失败这么多次后进入冷却，冷却期内直接快速失败。
+# 目的是掐断「连接超时 → 泄漏一个卡住的子线程 → 线程堆积 → 实例拖死」的正反馈。
+DB_BLOCK_AFTER_FAILS = 3
+DB_BLOCK_COOLDOWN = 60   # 秒；冷却结束自动重试，DB 恢复即痊愈
+_db_block = {'until': 0.0, 'fails': 0}
+
 
 def _connect_with_hard_timeout(connect_fn, timeout=20):
     """用子线程给 psycopg2.connect 套硬超时。
@@ -44,9 +50,21 @@ def _connect_with_hard_timeout(connect_fn, timeout=20):
     保证必定有返回：超时→TimeoutError→scan_once finally 释放锁→
     scheduler 60s 重试→compute 冷启动完成后即自愈。
 
-    超时后子线程仍在后台运行(daemon)，最终会因服务端关闭而结束，无泄漏风险。
+    ⚠️ 熔断保护（2026-09-23 加）：超时的子线程并不能保证很快结束 ——
+    当 DB 是「连接被静默丢弃」而不是「慢」时，子线程会卡在 socket 上很久
+    (TCP SYN 重试 / libpq 内部超时都可能远超 20s)。实测 DB 不可用 13 分钟
+    就堆积了 71 个线程，最终把实例拖死（这就是"网页打不开"的机制）。
+    所以连续失败后进入冷却期，期间直接快速失败、不再新建子线程，
+    掐断这个正反馈；冷却结束再试，DB 恢复即自动痊愈。
     """
     import threading
+    import time as _t
+
+    left = _db_block['until'] - _t.time()
+    if left > 0:
+        raise TimeoutError(
+            f'DB 连接已熔断（连续失败，{int(left)}s 后重试）')
+
     box = {}
 
     def _work():
@@ -59,10 +77,17 @@ def _connect_with_hard_timeout(connect_fn, timeout=20):
     t.start()
     t.join(timeout)
     if t.is_alive():
+        _db_block['fails'] += 1
+        if _db_block['fails'] >= DB_BLOCK_AFTER_FAILS:
+            _db_block['until'] = _t.time() + DB_BLOCK_COOLDOWN
+            _db_block['fails'] = 0
         raise TimeoutError(
             f'DB connect exceeded {timeout}s (likely Neon compute cold-start)')
     if 'error' in box:
+        # 明确的报错（认证失败/库不存在等）不算网络层问题，不累计失败
         raise box['error']
+    _db_block['fails'] = 0
+    _db_block['until'] = 0.0
     return box['result']
 
 
