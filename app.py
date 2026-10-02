@@ -207,19 +207,21 @@ def _build_summary_message():
             (f['code'],)).fetchone()
         if not last:
             continue
-        # 晚间净值已确认用实际值，未确认则回退估值
-        chg = (last['actual_change'] if last['nav_date'] == today
-               else (last['estimated_change']
-                     if last['estimated_change'] is not None
-                     else last['actual_change']))
+        # 只汇总"今天已确认"的净值。盘中估值全行业下架后 estimated_change 恒为
+        # None，旧逻辑会退回上一交易日的 actual_change 再带个日期后缀 ——
+        # 休市日/净值未出时就推一条"昨天的涨跌"，用户看到的还是旧数字
+        # （2026-10-01 国庆推的就是 09-30 的净值）。
+        # 宁可这一轮不发（到点后每轮扫描都会重试），也不推过期净值。
+        if last['nav_date'] != today:
+            continue
+        chg = last['actual_change']
         if chg is None:
             continue
         sign = '+' if chg > 0 else ''
         nav = last['unit_nav']
-        date_tag = '' if last['nav_date'] == today else '（%s）' % (last['nav_date'] or '')
-        lines.append('· %s(%s) %s%s%%，净值 %s%s' % (
+        lines.append('· %s(%s) %s%s%%，净值 %s' % (
             f['name'], f['code'], sign, '%.2f' % chg,
-            '%.4f' % nav if nav else '—', date_tag))
+            '%.4f' % nav if nav else '—'))
     conn.close()
     if not lines:
         return None, 0
@@ -277,13 +279,16 @@ def _build_index_summary_message():
     indices = fund_data.fetch_indices(max_age=120)
     if not indices:
         return None, 0
-    # is_trading_day 只挡周末、挡不住节假日：节假日接口返回的是上一交易日的
-    # 收官数据。用行情自带日期兜底——没有任何一条是今天的，就不是收盘汇总。
+    # 逐条按行情自带日期过滤。原来是"任意一条是今天就算今天的汇总"，
+    # 2026-10-01（国庆）美股当天有行情，于是 A股 09-30 的收官数据被一起
+    # 当成"10-01 的指数收盘汇总"推了出去 —— 逐条过滤后这种混装不可能发生。
+    # 附带效果（正向）：北京时间 17:00 时美股行情日期还停在美东上一交易日，
+    # 会被过滤掉，汇总里不再混入隔夜美股（美股另有独立的 08:00 早间汇总）。
     today = rule_engine.today_str()
-    if not any((ix.get('quote_date') or '') == today for ix in indices):
-        return None, 0
     lines = []
     for ix in indices:
+        if (ix.get('quote_date') or '') != today:
+            continue
         chg = ix.get('change_pct')
         if chg is None:
             continue
@@ -1292,7 +1297,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.25', 'commit': 'db-breaker'})
+    return jsonify({'version': '3.26', 'commit': 'holiday-calendar'})
 
 
 @app.route('/api/threads')

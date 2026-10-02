@@ -108,7 +108,23 @@ assert fund_data._quote_date('20260914133727') == '2026-09-14', 'A股紧凑格�
 assert fund_data._quote_date('2026/09/14 13:22:28') == '2026-09-14', '港股格式解析失败'
 assert fund_data._quote_date('') is None and fund_data._quote_date(None) is None
 assert fund_data._quote_date('abc') is None
-print('[5/8] 行情日期解析 OK')
+
+# ---------- 5b. A股交易日闸门（周末 + 法定节假日都要挡住） ----------
+# 2026-10-02（周五，国庆 A股休市）港股照常开市、恒生当天有真实行情，
+# 旧实现只看 weekday → 被当成交易日，恒生阈值提醒与盘中快报照发。
+import datetime as _dt
+def _td(y, m, d):
+    return rule_engine.is_trading_day(_dt.datetime(y, m, d, 10, 0))
+assert _td(2026, 10, 2) is False, '国庆休市日（周五）必须是非交易日'
+assert _td(2026, 10, 1) is False, '国庆当日'
+assert _td(2026, 10, 7) is False, '国庆最后一日'
+assert _td(2026, 2, 17) is False, '春节休市日'
+assert _td(2026, 5, 4) is False, '劳动节休市日'
+assert _td(2026, 9, 27) is False, '周日'
+assert _td(2026, 10, 8) is True, '国庆后首个交易日必须放行'
+assert _td(2026, 9, 28) is True, '中秋后首个交易日必须放行'
+assert _td(2026, 6, 22) is True, '端午后首个交易日必须放行'
+print('[5/8] 行情日期解析 + A股交易日闸门 OK')
 
 # ---------- 6. 盘中快报去重表 ----------
 import database as db2
