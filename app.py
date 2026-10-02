@@ -348,14 +348,24 @@ def maybe_send_index_summary():
 
 
 def _build_us_index_summary_message():
-    """生成美股指数昨夜收盘汇总消息（secid 以 us 开头，如纳指100），返回 (msg, 条数)"""
+    """生成美股指数最近一个交易日收盘汇总，返回 (msg, 条数, 行情日期)
+
+    行情日期（美东，取自行情自带字段）同时充当这条汇总的**去重标识**：
+    美股周五收盘后，周六/周日/周一早上接口返回的都是同一份数据，
+    只能按行情日期去重，按"北京今天有没有推过"会连推三条一模一样的。
+    """
     indices = fund_data.fetch_indices(max_age=120)
     if not indices:
-        return None, 0
+        return None, 0, None
+    rows = [ix for ix in indices if (ix.get('secid') or '').startswith('us')]
+    if not rows:
+        return None, 0, None
+    # 一条汇总只描述一个美股交易日，用第一条的行情日期做标识
+    qd = rows[0].get('quote_date') or ''
+    if not qd:
+        return None, 0, None   # fail-closed：日期取不到就不发，宁可晚一轮
     lines = []
-    for ix in indices:
-        if not (ix.get('secid') or '').startswith('us'):
-            continue
+    for ix in rows:
         chg = ix.get('change_pct')
         if chg is None:
             continue
@@ -364,18 +374,25 @@ def _build_us_index_summary_message():
         lines.append('· %s %s%.2f%%，%s' % (
             ix['name'], sign, chg, ('%.2f' % price) if price else '—'))
     if not lines:
-        return None, 0
-    weekday = '周' + '一二三四五六日'[rule_engine.now().weekday()]
-    msg = '🌙 美股昨夜收盘 %s %s\n%s' % (
-        rule_engine.today_str(), weekday, '\n'.join(lines))
-    return msg, len(lines)
+        return None, 0, None
+    try:
+        weekday = '周' + '一二三四五六日'[datetime.date.fromisoformat(qd).weekday()]
+    except Exception:
+        weekday = ''
+    # 日期用行情自带的美东日期，而不是"北京今天"—— 否则周日早上收到的
+    # 是周五的行情却标成周日（2026-09-27 那条就是这么错的）。
+    msg = '🌙 美股昨夜收盘 %s %s\n%s' % (qd, weekday, '\n'.join(lines))
+    return msg, len(lines), qd
 
 
 def maybe_send_us_index_summary():
-    """每天到点（默认 08:00）推送美股昨夜收盘汇总，alert_log 去重
+    """到点（默认 08:00）推送美股最近一个交易日的收盘汇总；同一份行情只推一次
 
     美股(纳指100)交易日与 A股错位、且在北京时间夜间交易，故不做
-    is_trading_day 判断——每天早晨固定推一条昨夜收盘情况，无论涨跌。
+    is_trading_day 判断 —— 到点后只要有"还没推过的新行情"就推一条，无论涨跌。
+    去重键是**行情自带的美东日期**，不是"北京今天有没有推过"：周五收盘后
+    周六/周日/周一早上拿到的是同一份数据，按日期去重才不会连推三条同样的
+    （旧逻辑每天推一条，周末就是纯噪音）。
     """
     cfg = load_config()
     us = cfg.get('us_index_summary') or {}
@@ -389,18 +406,17 @@ def maybe_send_us_index_summary():
         return False
     if (now.hour, now.minute) < (h, m):
         return False
-    today = rule_engine.today_str()
+
+    msg, _, qd = _build_us_index_summary_message()
+    if msg is None:
+        return False
     conn = database.get_conn()
     row = conn.execute(
         "SELECT COUNT(*) AS c FROM alert_log WHERE kind='us_index_summary' "
-        "AND trigger_time LIKE ?", (today + '%',)).fetchone()
+        "AND message LIKE ?", ('%' + qd + ' %',)).fetchone()
     conn.close()
     if row['c'] > 0:
-        return False
-
-    msg, _ = _build_us_index_summary_message()
-    if msg is None:
-        return False
+        return False  # 这份行情已经推过了
     result = notifier.send_alert(cfg, '基金监控 · 美股昨夜', msg)
     conn = database.get_conn()
     conn.execute(
@@ -1297,7 +1313,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.26', 'commit': 'holiday-calendar'})
+    return jsonify({'version': '3.27', 'commit': 'us-summary-dedup'})
 
 
 @app.route('/api/threads')
