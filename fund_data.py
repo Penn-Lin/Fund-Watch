@@ -268,6 +268,34 @@ def _quote_date(raw):
     return '%s-%s-%s' % (digits[:4], digits[4:6], digits[6:8])
 
 
+def _quote_hhmm(raw):
+    """从腾讯行情的时间字段解析出"当地方言时间"的 HHMM 整数（如 1715）。
+
+    跨市场含义不同（**这是美股汇总修复的关键**）：
+      · A 股 '20261008153800' / 港股 '2026/10/08 15:22:57' → 北京时间；
+      · 美股 '2026-10-07 17:15:59' → **美东时间**（字段日期也是美东日期）。
+
+    美股那个字段只在**开盘(美东 09:30)时才把日期翻到当天**，因此收盘后到
+    次日开盘前，它一直冻结在"上一个交易日 16:00 之后"的时间；
+    而次日开盘瞬间就变成当天 09:3x —— 只看日期翻页会把"刚开盘 4 分钟的
+    行情"当成"昨夜收盘"推出去（2026-10-05~10-07 连推三晚就是这么来的）。
+    取到 HHMM 才能判"这一场是不是已经收了"。
+    解析不出返回 None。
+    """
+    if not raw:
+        return None
+    digits = ''.join(c for c in str(raw) if c.isdigit())
+    if len(digits) < 12:
+        return None
+    try:
+        h, m = int(digits[8:10]), int(digits[10:12])
+    except ValueError:
+        return None
+    if h > 23 or m > 59:
+        return None
+    return h * 100 + m
+
+
 def _index_extra(secid, parts):
     """腾讯 qt 的附加字段。跨市场字段位**不统一**，只取有把握的两个：
 
@@ -298,11 +326,14 @@ def fetch_indices(max_age=60.0):
       [1]名称 [2]代码 [3]当前价 [4]昨收 [5]今开 [30]行情时间
       [31]涨跌额 [32]涨跌幅% [33]最高 [34]最低
     返回：[{'secid','code','name','price','change_pct','change_amt',
-            'open','pre_close','high','low','quote_time','quote_date'}, ...]
+            'open','pre_close','high','low','quote_time','quote_date',
+            'quote_hhmm'}, ...]
 
     quote_date 很重要：收盘后/周末/节假日接口返回的是**上一个交易日**的
     收盘值，change_pct 仍是旧值。调用方必须用它判断"这份行情是不是今天的"，
     否则半夜日期翻页后，旧行情会被当成当日行情重新触发一遍提醒。
+    quote_hhmm 见 `_quote_hhmm()`：只有美股用得上（判"这场收了没有"），
+    A 股/港股给的是北京时间，可用于诊断。
     """
     now = time.time()
     if _index_cache['data'] and now - _index_cache['ts'] < max_age:
@@ -349,6 +380,7 @@ def fetch_indices(max_age=60.0):
                 'amplitude': amp,
                 'quote_time': parts[30],
                 'quote_date': _quote_date(parts[30]),
+                'quote_hhmm': _quote_hhmm(parts[30]),
                 **_index_extra(key, parts),
             })
         if out:

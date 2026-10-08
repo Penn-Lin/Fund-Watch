@@ -129,20 +129,20 @@
 
       <div class="card">
         <div class="card-head"><h2>微信推送</h2></div>
-        <p class="hint">Server酱 SendKey 见 sct.ftqq.com；PushPlus Token 见 pushplus.plus。填一个即可。</p>
+        <p class="hint">Server酱 SendKey 见 sct.ftqq.com；PushPlus Token 见 pushplus.plus。填一个即可。出于安全考虑，密钥不再回显：显示「已保存（留空保持不变）」表示已配置，想更换直接填新的。</p>
         <div class="form-block">
           <div class="form-title">Server酱 SendKey</div>
-          <input id="cf-sk" type="text" placeholder="SCT...">
+          <input id="cf-sk" type="text" placeholder="SCT..." autocomplete="off">
         </div>
         <div class="form-block">
           <div class="form-title">PushPlus Token</div>
-          <input id="cf-pt" type="text" placeholder="留空则不用">
+          <input id="cf-pt" type="text" placeholder="留空则不用" autocomplete="off">
         </div>
       </div>
 
       <div class="card">
         <div class="card-head"><h2>邮件提醒</h2></div>
-        <p class="hint">QQ/163 邮箱需用「授权码」而非登录密码</p>
+        <p class="hint">QQ/163 邮箱需用「授权码」而非登录密码。授权码不再回显，留空即保持不变。</p>
         <div class="form-block">
           <div class="form-title">SMTP 服务器</div>
           <input id="cf-host" type="text" placeholder="smtp.qq.com">
@@ -157,7 +157,7 @@
         </div>
         <div class="form-block">
           <div class="form-title">授权码 / 密码</div>
-          <input id="cf-pass" type="password">
+          <input id="cf-pass" type="password" autocomplete="new-password">
         </div>
         <div class="form-block">
           <div class="form-title">收件邮箱（多个用逗号分隔）</div>
@@ -181,11 +181,15 @@
 
       <div class="card">
         <div class="card-head"><h2>指数涨跌提醒</h2></div>
-        <p class="hint">任一主要指数当日涨跌幅达到设定阈值时即时推送（每指数每方向每日一次）</p>
+        <p class="hint">主要指数当日涨跌幅达到阈值时推送。<b>同一时间窗内新触发的指数会合并成一条</b>推送（每指数每方向每日只报一次），避免指数一多就十来分钟响一次。</p>
         <div class="form-row">
           <span class="form-label">阈值 ±%</span>
-          <input id="cf-ixa-th" type="number" step="0.5" min="0.5" value="3">
+          <input id="cf-ixa-th" type="number" step="0.5" min="0.5" value="1">
           <label class="switch"><input id="cf-ixa-on" type="checkbox"><i></i></label>
+        </div>
+        <div class="form-row">
+          <span class="form-label">合并间隔（分钟）</span>
+          <input id="cf-ixa-gap" type="number" step="5" min="5" max="120" value="15">
         </div>
       </div>
 
@@ -210,8 +214,8 @@
       </div>
 
       <div class="card">
-        <div class="card-head"><h2>美股昨夜汇总</h2></div>
-        <p class="hint">每天早晨推送一条美股指数（纳指100等）昨夜收盘涨跌汇总，无论涨跌都推；美股不再参与盘中实时阈值提醒</p>
+        <div class="card-head"><h2>美股收盘汇总</h2></div>
+        <p class="hint">每天早晨推送一条美股指数（纳指100）最近一个交易日<b>收盘</b>涨跌汇总，无论涨跌都推；美股不参与盘中实时阈值提醒。<b>只在美股确认收盘后才发</b>（北京时间约 05:00 之后），所以推送时间请设置在 05:00–21:30 之间。</p>
         <div class="form-row">
           <span class="form-label">推送时间</span>
           <input id="cf-usix-time" type="time" value="08:00">

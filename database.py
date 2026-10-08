@@ -32,6 +32,7 @@ except ImportError:
 DEFAULT_CONFIG = {
     'scan_interval_seconds': 60,
     'off_hours_interval_seconds': 600,
+    'index_alert': {'enabled': False, 'threshold': 3, 'interval_min': 15},
     'us_index_summary': {'enabled': False, 'time': '08:00'},
 }
 

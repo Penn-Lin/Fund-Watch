@@ -27,9 +27,11 @@ function grabConst(name) {
 }
 
 const code = ['esc', 'pct', 'cls', 'parseBriefNote', 'briefSubHTML', 'briefSummaryHTML',
+  'parseSummaryLine', 'parseAlert',
   'num', 'fmtHM', 'fmtQuoteTime', 'fmtAmount', 'rangePos', 'periodPct', 'ixZoneText']
-  .map(grab).join('\n') + '\n' + grabConst('briefEmpty');
+  .map(grab).join('\n') + '\n' + grabConst('briefEmpty') + '\n' + grabConst('SUMMARY_KINDS');
 const M = new Function(code + '\nreturn {esc,pct,cls,parseBriefNote,briefSubHTML,briefSummaryHTML,'
+  + 'parseSummaryLine,parseAlert,'
   + 'num,fmtHM,fmtQuoteTime,fmtAmount,rangePos,periodPct,ixZoneText};')();
 
 const fail = [];
@@ -95,6 +97,24 @@ ok('区间分位文案', M.ixZoneText(90) === '接近上沿' && M.ixZoneText(50)
 const kl6 = [100, 101, 102, 103, 104, 105].map((c, i) => ({ date: '2026-09-0' + (i + 1), close: c }));
 ok('近5日涨跌幅', Math.abs(M.periodPct(kl6, 5) - 5) < 1e-9, String(M.periodPct(kl6, 5)));
 ok('历史不足时不编造长周期', M.periodPct(kl6, 20) === null && M.periodPct(kl6, 250) === null);
+
+// ---- 6. 聚合指数提醒（index_batch）必须走"带色带列表"渲染 ----
+// 与 app._build_index_batch_message 的输出格式一一对应。后端把单条提醒
+// 改成聚合消息后，前端若没把 index_batch 收进 SUMMARY_KINDS，就会退化成
+// "一大坨灰字"——不报错，所以在这里钉住。
+const BATCH = '⚡ 指数提醒 10:31\n'
+  + '· 创业板指 -1.24%，3068.62\n'
+  + '· 科创50 -3.66%，1474.04\n'
+  + '共 2 个指数超 ±1.00%';
+const pb = M.parseAlert({ kind: 'index_batch', message: BATCH });
+ok('聚合提醒走列表渲染', pb.type === 'list' && pb.rows.length === 2, JSON.stringify(pb).slice(0, 90));
+ok('聚合提醒数据行解析正确',
+  pb.rows[0].name === '创业板指' && pb.rows[0].pct === -1.24 && pb.rows[0].extra === '3068.62'
+  && pb.rows[1].pct === -3.66, JSON.stringify(pb.rows));
+ok('聚合提醒"共 N 个"行进 notes，不被当数据行',
+  pb.notes.length === 1 && pb.notes[0].indexOf('共 2 个指数超') === 0, JSON.stringify(pb.notes));
+ok('聚合提醒标为下跌（浮层色带用）',
+  pb.rows.filter((r) => r.pct < 0).length === 2);
 
 console.log(fail.length ? '\n失败 ' + fail.length + ' 项: ' + fail.join(' / ') : '\n前端回归全部通过');
 process.exit(fail.length ? 1 : 0);

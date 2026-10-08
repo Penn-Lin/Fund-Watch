@@ -109,6 +109,15 @@ assert fund_data._quote_date('2026/09/14 13:22:28') == '2026-09-14', '港股格�
 assert fund_data._quote_date('') is None and fund_data._quote_date(None) is None
 assert fund_data._quote_date('abc') is None
 
+# 5a. 行情时刻解析（美股"这场收没收盘"的唯一判据）
+# 美股那个时间戳是美东时间：收盘后冻结在上一个交易日 16:00 之后，
+# 开盘瞬间就变成当天 09:3x —— 只看日期会把"刚开盘"当成"昨夜收盘"。
+assert fund_data._quote_hhmm('20261008153800') == 1538, 'A股时刻解析失败'
+assert fund_data._quote_hhmm('2026/10/08 15:22:57') == 1522, '港股时刻解析失败'
+assert fund_data._quote_hhmm('2026-10-07 17:15:59') == 1715, '美股时刻解析失败'
+assert fund_data._quote_hhmm('') is None and fund_data._quote_hhmm(None) is None
+assert fund_data._quote_hhmm('2026-10-07') is None
+
 # ---------- 5b. A股交易日闸门（周末 + 法定节假日都要挡住） ----------
 # 2026-10-02（周五，国庆 A股休市）港股照常开市、恒生当天有真实行情，
 # 旧实现只看 weekday → 被当成交易日，恒生阈值提醒与盘中快报照发。
@@ -173,7 +182,54 @@ assert '板块领涨 医疗服务' in note and '板块领跌 种植业' in note
 msg2 = app_mod._build_intraday_message('11:30', ROWS, -0.4, ([], []))
 # 标题 + 每个指数一行 + 总结一行
 assert '板块' not in msg2 and msg2.count('\n') == len(ROWS) + 1, msg2
-print('[7/8] 盘中快报纯函数 OK →\n%s' % msg)
+
+# 7b. 聚合指数提醒（阈值 1% 时各指数穿越时点分散，逐个推就是十来分钟响一次）
+ixa = app_mod._index_alert_cfg({})
+assert ixa['interval_min'] == 15 and ixa['threshold'] == 3.0, ixa
+assert app_mod._index_alert_cfg({'index_alert': {'threshold': 1}})['threshold'] == 1.0
+assert app_mod._index_alert_cfg({'index_alert': {'interval_min': 1}})['interval_min'] == 5, '间隔下限 5 分钟'
+assert app_mod._index_alert_cfg({'index_alert': {'threshold': 'x'}})['threshold'] == 3.0, '脏阈值回退'
+BATCH = app_mod._build_index_batch_message(
+    '10:31', [{'name': '科创50', 'change_pct': -3.66, 'price': 1474.04},
+              {'name': '创业板指', 'change_pct': -1.24, 'price': 3068.62}], 1.0)
+bl = BATCH.split('\n')
+assert bl[0] == '⚡ 指数提醒 10:31', bl[0]
+assert all(l.startswith('· ') and '%，' in l for l in bl[1:-1]), BATCH
+assert not bl[-1].startswith('·') and '共 2 个指数超 ±1.00%' == bl[-1], bl[-1]
+
+# 7c. 美股汇总的两道闸门
+# ① 这场得收完盘（美东 09:30-16:00 之间 = 还在交易，不能推"昨夜收盘"）
+assert app_mod._us_session_closed([{'quote_hhmm': 1715}]) is True, '美东 17:15 = 已收盘'
+assert app_mod._us_session_closed([{'quote_hhmm': 934}]) is False, '美东 09:34 刚开盘，绝不能再推'
+assert app_mod._us_session_closed([{'quote_hhmm': 1559}]) is False
+assert app_mod._us_session_closed([{'quote_hhmm': None}]) is False, 'fail-closed'
+assert app_mod._us_session_closed([]) is False
+# ② 北京时点必须落在"美股必然休市"的窗口（美股在北京 21:30-04:00 / 22:30-05:00 交易）
+def _us_win(y, m, d, hh, mm):
+    return app_mod._in_us_closed_window(_dt.datetime(y, m, d, hh, mm))
+assert _us_win(2026, 10, 8, 8, 0) is True, '早上 08:00 必须放行'
+assert _us_win(2026, 10, 8, 5, 0) is True
+assert _us_win(2026, 10, 8, 21, 29) is True
+assert _us_win(2026, 10, 7, 21, 34) is False, '21:34 是美股开盘时刻，必须挡住（10-07 那条假汇总）'
+assert _us_win(2026, 10, 8, 2, 0) is False, '凌晨 02:00 美股还在交易'
+# 7d. 接口不下发明文密钥
+cf = app_mod._config_for_client({'serverchan_sendkey': 'SCTxxx',
+                                 'pushplus_token': 'tok',
+                                 'email': {'password': 'authcode', 'username': 'a@b.c'},
+                                 'vapid': {'private_key': 'PRIVATE'}})
+assert cf['serverchan_sendkey'] == '' and cf['pushplus_token'] == ''
+assert cf['email']['password'] == '' and 'vapid' not in cf
+assert cf['secrets_set'] == {'serverchan': True, 'pushplus': True,
+                            'email_password': True, 'vapid': True}
+assert cf['email']['username'] == 'a@b.c', '非机密字段要照常返回'
+merged = {'serverchan_sendkey': 'SCTxxx', 'pushplus_token': 'tok', 'email': {'password': 'authcode'}}
+app_mod._merge_secret(merged, {'serverchan_sendkey': ''}, 'serverchan_sendkey')
+assert merged['serverchan_sendkey'] == 'SCTxxx', '留空必须保留原值（否则保存设置会清空密钥）'
+app_mod._merge_secret(merged, {'serverchan_sendkey': 'NEW'}, 'serverchan_sendkey')
+assert merged['serverchan_sendkey'] == 'NEW'
+app_mod._merge_secret(merged, {'serverchan_sendkey': app_mod.SECRET_MASK}, 'serverchan_sendkey')
+assert merged['serverchan_sendkey'] == 'NEW', '掩码回传也必须保留原值'
+print('[7/8] 盘中快报纯函数 + 聚合提醒/美股闸门/密钥掩码 OK →\n%s' % msg)
 
 # ---------- 8. 前端解析/排版回归（node uitest.mjs） ----------
 # 后端消息格式与前端解析强耦合，改了文案没改前端就是"App 里退化成一大坨灰字"，

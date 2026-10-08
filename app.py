@@ -247,18 +247,18 @@ def maybe_send_summary():
     if (now.hour, now.minute) < (h, m):
         return False
     today = rule_engine.today_str()
-    conn = database.get_conn()
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM alert_log WHERE kind='daily_summary' "
-        "AND trigger_time LIKE ?", (today + '%',)).fetchone()
-    conn.close()
-    if row['c'] > 0:
+    # 去重靠 intraday_log（业务键=日期），不用 alert_log + trigger_time LIKE：
+    # 后者有个副作用 —— 用户在前端删掉那条记录只是为了清理列表，
+    # 去重却跟着失效，到点后的下一轮扫描会把这同一份汇总再推一遍。
+    if database.intraday_sent(today, 'daily_summary', 'sent'):
         return False  # 今天已发过
 
     msg, _ = _build_summary_message()
     if msg is None:
         return False
     result = notifier.send_alert(cfg, '基金监控 · 收盘汇总', msg)
+    database.intraday_mark(today, 'daily_summary', 'sent', None,
+                           rule_engine.now_str())
     conn = database.get_conn()
     conn.execute(
         'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
@@ -311,7 +311,7 @@ def maybe_send_index_summary():
     ds = cfg.get('index_summary') or {}
     if not ds.get('enabled'):
         return False
-    hhmm = str(ds.get('time') or '20:00')
+    hhmm = str(ds.get('time') or '17:00')
     now = rule_engine.now()
     if not rule_engine.is_trading_day(now):
         return False
@@ -322,18 +322,16 @@ def maybe_send_index_summary():
     if (now.hour, now.minute) < (h, m):
         return False
     today = rule_engine.today_str()
-    conn = database.get_conn()
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM alert_log WHERE kind='index_summary' "
-        "AND trigger_time LIKE ?", (today + '%',)).fetchone()
-    conn.close()
-    if row['c'] > 0:
+    # 同 daily_summary：去重放 intraday_log，避免"删掉记录 → 立刻重推"
+    if database.intraday_sent(today, 'index_summary', 'sent'):
         return False
 
     msg, _ = _build_index_summary_message()
     if msg is None:
         return False
     result = notifier.send_alert(cfg, '基金监控 · 指数收盘汇总', msg)
+    database.intraday_mark(today, 'index_summary', 'sent', None,
+                           rule_engine.now_str())
     conn = database.get_conn()
     conn.execute(
         'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
@@ -347,17 +345,52 @@ def maybe_send_index_summary():
     return True
 
 
+def _us_index_rows():
+    """取出美股指数行（当前只有纳指100）；无则空列表"""
+    indices = fund_data.fetch_indices(max_age=120)
+    if not indices:
+        return []
+    return [ix for ix in indices if (ix.get('secid') or '').startswith('us')]
+
+
+# 美股常规交易时段（美东 09:30-16:00）换算到北京时间为 21:30-04:00（夏令时）
+# 或 22:30-05:00（冬令时）。所以北京时间的 [04:30, 21:30) 必然落在美股休市区间。
+# 这是**第二道**闸门（第一道是行情自带的美东时间），用来兜住"行情时间字段
+# 格式变了解析不出来"的情况，避免又在晚上用盘中数据推一条"昨夜收盘"。
+_US_CLOSED_WINDOW = (430, 2130)
+
+
+def _us_session_closed(rows):
+    """这一批美股行情代表的那个交易日，是不是**已经收完盘**了。
+
+    判据是行情自带时间戳的**时:分**（美东）：>= 16:00 才算收完。
+    美东 09:30-16:00 之间字段时间是盘中时间，说明这一场还在交易中 ——
+    此时不能推"昨夜收盘"，否则推的是刚开盘没几分钟的行情。
+    fail-closed：时间取不到就当作"没收"，宁可晚一轮也不推错数据。
+    """
+    hm = rows[0].get('quote_hhmm') if rows else None
+    if hm is None:
+        return False
+    return hm >= 1600
+
+
+def _in_us_closed_window(now):
+    """北京时间是否落在"美股必定休市"的窗口内（见 _US_CLOSED_WINDOW）"""
+    hm = now.hour * 100 + now.minute
+    return _US_CLOSED_WINDOW[0] <= hm < _US_CLOSED_WINDOW[1]
+
+
 def _build_us_index_summary_message():
     """生成美股指数最近一个交易日收盘汇总，返回 (msg, 条数, 行情日期)
 
     行情日期（美东，取自行情自带字段）同时充当这条汇总的**去重标识**：
     美股周五收盘后，周六/周日/周一早上接口返回的都是同一份数据，
     只能按行情日期去重，按"北京今天有没有推过"会连推三条一模一样的。
+
+    ⚠️ 调用方必须先过 `_us_session_closed()`：行情日期只在美东开盘那一刻
+    才翻页，光看日期会把"刚开盘"的行情当成"昨夜收盘"。
     """
-    indices = fund_data.fetch_indices(max_age=120)
-    if not indices:
-        return None, 0, None
-    rows = [ix for ix in indices if (ix.get('secid') or '').startswith('us')]
+    rows = _us_index_rows()
     if not rows:
         return None, 0, None
     # 一条汇总只描述一个美股交易日，用第一条的行情日期做标识
@@ -381,7 +414,7 @@ def _build_us_index_summary_message():
         weekday = ''
     # 日期用行情自带的美东日期，而不是"北京今天"—— 否则周日早上收到的
     # 是周五的行情却标成周日（2026-09-27 那条就是这么错的）。
-    msg = '🌙 美股昨夜收盘 %s %s\n%s' % (qd, weekday, '\n'.join(lines))
+    msg = '🌙 美股收盘 %s %s\n%s' % (qd, weekday, '\n'.join(lines))
     return msg, len(lines), qd
 
 
@@ -390,9 +423,22 @@ def maybe_send_us_index_summary():
 
     美股(纳指100)交易日与 A股错位、且在北京时间夜间交易，故不做
     is_trading_day 判断 —— 到点后只要有"还没推过的新行情"就推一条，无论涨跌。
-    去重键是**行情自带的美东日期**，不是"北京今天有没有推过"：周五收盘后
-    周六/周日/周一早上拿到的是同一份数据，按日期去重才不会连推三条同样的
-    （旧逻辑每天推一条，周末就是纯噪音）。
+
+    两个必须同时成立的闸门（v3.28 修）：
+
+    ① **这场得收完盘**（`_us_session_closed`）。腾讯美股行情的日期字段
+       只在美东开盘(北京 21:30)那一刻才翻到当天，收盘后整夜冻结在
+       "上一交易日 16:00 之后"。旧代码只看日期，于是北京 21:3x 一翻页就用
+       **刚开盘 4 分钟**的行情推了一条"昨夜收盘"（10-05/06/07 连推三晚，
+       数值 -0.64% 而当日真实收盘是 -0.21%），而且这条假汇总把
+       `2026-10-07` 这个去重名额占掉了 —— 次日早上 08:00 真收盘数据
+       反而被当成"已推过"直接跳过。**用户"美股复盘没推送"就是这么来的。**
+    ② **北京时点落在美股休市窗口**（`_in_us_closed_window`），兜住行情
+       时间字段格式变更导致 ① 失效的情况。
+
+    去重键用 `intraday_log(stat_date=美东行情日期)`，不再用
+    `message LIKE '%日期 %'` —— 后者既怕消息文案改动，又有个副作用：
+    用户在界面里删掉那条记录后去重即失效、下一轮会重推一遍。
     """
     cfg = load_config()
     us = cfg.get('us_index_summary') or {}
@@ -406,18 +452,20 @@ def maybe_send_us_index_summary():
         return False
     if (now.hour, now.minute) < (h, m):
         return False
+    if not _in_us_closed_window(now):
+        return False
 
+    rows = _us_index_rows()
+    if not rows or not _us_session_closed(rows):
+        return False
     msg, _, qd = _build_us_index_summary_message()
     if msg is None:
         return False
-    conn = database.get_conn()
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM alert_log WHERE kind='us_index_summary' "
-        "AND message LIKE ?", ('%' + qd + ' %',)).fetchone()
-    conn.close()
-    if row['c'] > 0:
-        return False  # 这份行情已经推过了
-    result = notifier.send_alert(cfg, '基金监控 · 美股昨夜', msg)
+    if database.intraday_sent(qd, 'us_index_summary', 'sent'):
+        return False  # 这一场美股已经推过了
+    result = notifier.send_alert(cfg, '基金监控 · 美股收盘', msg)
+    database.intraday_mark(qd, 'us_index_summary', 'sent', None,
+                           rule_engine.now_str())
     conn = database.get_conn()
     conn.execute(
         'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
@@ -430,20 +478,85 @@ def maybe_send_us_index_summary():
     return True
 
 
+def _index_alert_cfg(cfg):
+    """指数涨跌提醒配置归一：阈值 + 合并间隔（老配置缺 interval_min 也能跑）"""
+    ia = cfg.get('index_alert') or {}
+    try:
+        threshold = float(ia.get('threshold') or 3)
+    except (TypeError, ValueError):
+        threshold = 3.0
+    if threshold <= 0:
+        threshold = 3.0
+    try:
+        interval = int(ia.get('interval_min') or 15)
+    except (TypeError, ValueError):
+        interval = 15
+    interval = max(5, min(interval, 120))
+    return {'enabled': bool(ia.get('enabled')),
+            'threshold': threshold, 'interval_min': interval}
+
+
+def _build_index_batch_message(hm, items, threshold):
+    """聚合后的指数提醒正文：一条推送列出本轮所有新穿越阈值的指数
+
+    格式约束（与前端 parseSummaryLine / parseAlert 强耦合，改文案必须同步 uitest）：
+      · 第 1 行标题；
+      · 中间每行 `· 名称 涨跌%，点位`；
+      · 最后一行**不能**以 `·` 开头，否则会被当成数据行（这里是"共 N 个"说明）。
+    """
+    lines = ['⚡ 指数提醒 %s' % hm]
+    for it in items:
+        sign = '+' if it['change_pct'] > 0 else ''
+        price = ('%.2f' % it['price']) if it.get('price') else '—'
+        lines.append('· %s %s%.2f%%，%s' % (
+            it['name'], sign, it['change_pct'], price))
+    lines.append('共 %d 个指数超 ±%.2f%%' % (len(items), threshold))
+    return '\n'.join(lines)
+
+
+def _index_alert_due(today, now, interval_min):
+    """距上一次聚合推送是否已过 interval_min；当天还没推过 → 立即放行
+
+    为什么要这道闸门：阈值 1% 时各指数穿越时点前后差十几分钟，
+    逐个推就是"十来分钟响一次"，而这类信息并不需要实时性 ——
+    把它们攒到同一个时间窗里合成一条，一天从 6 条变成 2~3 条。
+    """
+    conn = database.get_conn()
+    row = conn.execute(
+        "SELECT sent_at FROM intraday_log WHERE stat_date=? AND kind='ixpush' "
+        'ORDER BY sent_at DESC LIMIT 1', (today,)).fetchone()
+    conn.close()
+    if not row or not row['sent_at']:
+        return True
+    try:
+        last = datetime.datetime.strptime(str(row['sent_at'])[:19],
+                                          '%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return True   # 时间戳不可信就当没推过，宁可多推一条也不要卡住整天
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=now.tzinfo)
+    return (now - last).total_seconds() >= interval_min * 60
+
+
 def maybe_eval_indices():
-    """指数涨跌幅超阈值即时推送（每指数每方向每日一次去重）
+    """指数涨跌幅超阈值 → **按时间窗聚合后**推送（每指数每方向每日一次）
 
     必须只在「当日行情」上判定，否则会出两个 bug（2026-09-14 修）：
     ① 收盘后/周末/节假日，接口返回的是上一个交易日的收盘值，change_pct 还是旧值；
-       而 0 点日期一翻页，去重键（trigger_time LIKE '今天%'）就重置了，
-       于是旧行情被当成"今天的行情"重新推一遍 —— 用户半夜收到一堆重复提醒。
+       而 0 点日期一翻页，去重键就重置了，于是旧行情被当成"今天的行情"重推 ——
+       用户半夜收到一堆重复提醒。
     ② 更严重的是去重被这一次误触发占掉，当天真正跌破阈值时**不会再提醒**。
+
+    2026-10-08 改：从"每个指数一条"改为"一轮一条"。
+    阈值 1% 时各指数穿越时点分散，逐个推就是十来分钟响一次
+    （10-08 一天推了 6 条：恒生科技/创业板指/深证成指/沪深300/上证指数/恒生指数）。
+    现在把窗口内新穿越的指数合并成一条，间隔由 `index_alert.interval_min` 控制。
     """
     cfg = load_config()
-    ia = cfg.get('index_alert') or {}
-    if not ia.get('enabled'):
+    ia = _index_alert_cfg(cfg)
+    if not ia['enabled']:
         return 0
-    threshold = float(ia.get('threshold') or 3)
+    threshold = ia['threshold']
     if threshold <= 0:
         return 0
     # 不用"几点之前不算"这种时间闸门：A 股 09:25 集合竞价就出开盘价，
@@ -456,7 +569,8 @@ def maybe_eval_indices():
     if not indices:
         return 0
     today = rule_engine.today_str()
-    sent = 0
+
+    fresh = []
     for ix in indices:
         if (ix.get('secid') or '').startswith('us'):
             continue  # 美股指数改走早上汇总，不参与盘中实时阈值提醒
@@ -472,31 +586,44 @@ def maybe_eval_indices():
             'down' if chg <= -threshold else None)
         if not direction:
             continue
-        code = 'IX_' + (ix.get('secid') or ix.get('code') or ix['name'])
-        conn = database.get_conn()
-        already = conn.execute(
-            "SELECT COUNT(*) AS c FROM alert_log WHERE code=? AND kind='index_threshold' "
-            "AND direction=? AND trigger_time LIKE ?",
-            (code, direction, today + '%')).fetchone()['c']
-        if already:
-            conn.close()
+        secid = ix.get('secid') or ix.get('code') or ix['name']
+        # 去重键放 intraday_log 而不是 alert_log：用户在前端删掉一条记录
+        # 只是为了清理列表，不该顺带把"今天推过"这件事忘掉、下一轮又推一遍。
+        if database.intraday_sent(today, 'ixth', '%s:%s' % (secid, direction)):
             continue
-        sign = '+' if chg > 0 else ''
-        up_down = '上涨' if direction == 'up' else '下跌'
-        msg = '【%s】指数当日%s %s%.2f%%，达到阈值 %.2f%%' % (
-            ix['name'], up_down, sign, chg, threshold)
-        result = notifier.send_alert(cfg, '基金监控 · 指数提醒', msg)
-        conn.execute(
-            'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
-            'current_change, trigger_time, message, notify_status) '
-            'VALUES (?,?,?,?,?,?,?,?,?)',
-            (code, ix['name'], 'index', direction, 'index_threshold',
-             chg, rule_engine.now_str(), msg,
-             'sent' if result['ok'] else 'failed'))
-        conn.commit()
-        conn.close()
-        sent += 1
-    return sent
+        fresh.append({
+            'secid': secid, 'name': ix['name'], 'direction': direction,
+            'change_pct': chg, 'price': ix.get('price'),
+        })
+
+    if not fresh:
+        return 0
+    if not _index_alert_due(today, now, ia['interval_min']):
+        return 0   # 还在聚合窗口内：攒着，下一轮和后面的指数一起发
+
+    # 跌得最狠的排前面（与快报的阅读顺序一致）
+    fresh.sort(key=lambda r: r['change_pct'])
+    hm = now.strftime('%H:%M')
+    msg = _build_index_batch_message(hm, fresh, threshold)
+    result = notifier.send_alert(cfg, '基金监控 · 指数提醒', msg)
+    avg = sum(r['change_pct'] for r in fresh) / len(fresh)
+    ts = rule_engine.now_str()
+    for r in fresh:
+        database.intraday_mark(today, 'ixth',
+                               '%s:%s' % (r['secid'], r['direction']),
+                               r['change_pct'], ts)
+    database.intraday_mark(today, 'ixpush', hm, avg, ts)
+    conn = database.get_conn()
+    conn.execute(
+        'INSERT INTO alert_log (code, name, rule_type, direction, kind, '
+        'current_change, trigger_time, message, notify_status) '
+        'VALUES (?,?,?,?,?,?,?,?,?)',
+        ('IX_BATCH', '指数提醒', 'index', ('down' if avg < 0 else 'up'),
+         'index_batch', avg, ts, msg,
+         'sent' if result['ok'] else 'failed'))
+    conn.commit()
+    conn.close()
+    return 1
 
 
 # ------------------------- 盘中快报（时点骨架） -------------------------
@@ -645,7 +772,9 @@ def maybe_send_intraday_brief():
     sectors = fund_data.fetch_sectors(2)
     msg = _build_intraday_message(due, rows, avg, sectors)
     result = notifier.send_alert(cfg, '基金监控 · 盘中快报', msg)
-    database.intraday_mark(today, 'slot', due, avg)
+    # sent_at 显式传北京时间：数据库层的默认值走 datetime.now()（依赖服务器 TZ），
+    # 显式写进来才能保证跟 trigger_time / 其他时间戳同一口径，供别处比较。
+    database.intraday_mark(today, 'slot', due, avg, rule_engine.now_str())
     _log_intraday_alert('IX_BRIEF', '盘中快报', 'intraday_brief', avg, msg, result)
     return 1
 
@@ -680,14 +809,17 @@ def scheduler_loop():
             print('summary error:', e)
             cycle_ok = False
         try:
-            maybe_eval_indices()
-        except Exception as e:
-            print('index alert error:', e)
-            cycle_ok = False
-        try:
+            # 盘中快报排在指数阈值之前：它是用户最看重的"感知型"提醒，
+            # 而指数聚合推送内部有同步的 webpush 发送（可能耗时数秒），
+            # 放前面才不会把准点快报往后拖。
             maybe_send_intraday_brief()
         except Exception as e:
             print('intraday brief error:', e)
+            cycle_ok = False
+        try:
+            maybe_eval_indices()
+        except Exception as e:
+            print('index alert error:', e)
             cycle_ok = False
         try:
             maybe_send_index_summary()
@@ -1164,19 +1296,65 @@ def api_delete_alert(aid):
 
 # ------------------------- 配置 -------------------------
 
+# 这些字段**绝不能**回给浏览器明文：这个服务没有任何鉴权，接口是公网可达的。
+# 一旦明文返回，任何人访问 /api/config 就能拿到 SMTP 授权码（可直接发信）、
+# Server酱 SendKey（可给你的微信推任意消息）、VAPID 私钥（可伪造推送给你的设备）。
+# GET 只回空串 + 一个"是否已配置"的布尔，前端用 placeholder 提示"留空保持不变"；
+# POST 时留空（或回传掩码）→ 保留库里已有的值，避免保存设置把密钥清空。
+SECRET_KEYS = ('serverchan_sendkey', 'pushplus_token')
+SECRET_MASK = '••••••••'
+
+
+def _config_secret_flags(cfg):
+    ec = cfg.get('email') or {}
+    return {
+        'serverchan': bool((cfg.get('serverchan_sendkey') or '').strip()),
+        'pushplus': bool((cfg.get('pushplus_token') or '').strip()),
+        'email_password': bool((ec.get('password') or '').strip()),
+        'vapid': bool((cfg.get('vapid') or {}).get('private_key')),
+    }
+
+
+def _config_for_client(cfg):
+    """给前端的配置：补默认值 + 抹掉机密字段"""
+    out = dict(cfg)
+    for k in SECRET_KEYS:
+        if k in out:
+            out[k] = ''
+    if isinstance(out.get('email'), dict):
+        e = dict(out['email'])
+        if e.get('password'):
+            e['password'] = ''
+        out['email'] = e
+    # VAPID 私钥没有任何前端用途（前端只要公钥，另走 /api/vapid_public_key）
+    out.pop('vapid', None)
+    out['index_alert'] = _index_alert_cfg(cfg)
+    out['intraday_brief'] = _intraday_cfg(cfg)
+    out['secrets_set'] = _config_secret_flags(cfg)
+    return out
+
+
+def _merge_secret(cfg, data, key):
+    """把 data[key] 合并进 cfg[key]；空值/掩码 → 保留原值"""
+    if key not in data:
+        return
+    val = data.get(key)
+    if val is None or not str(val).strip() or val == SECRET_MASK:
+        return   # 留空 = 不改
+    cfg[key] = val
+
+
 @app.route('/api/config', methods=['GET', 'POST'])
 def api_config():
     if request.method == 'GET':
-        cfg = load_config()
-        # 归一化返回，保证前端拿到的永远是补好默认值的完整结构
-        cfg['intraday_brief'] = _intraday_cfg(cfg)
-        return jsonify(cfg)
+        return jsonify(_config_for_client(load_config()))
     data = request.get_json(silent=True) or {}
     cfg = load_config()
-    for k in ('serverchan_sendkey', 'pushplus_token',
-              'scan_interval_seconds', 'off_hours_interval_seconds'):
+    for k in ('scan_interval_seconds', 'off_hours_interval_seconds'):
         if k in data:
             cfg[k] = data[k]
+    for k in SECRET_KEYS:
+        _merge_secret(cfg, data, k)
     if 'daily_summary' in data:
         ds = data['daily_summary'] or {}
         cfg['daily_summary'] = {
@@ -1184,16 +1362,14 @@ def api_config():
             'time': str(ds.get('time') or '20:00'),
         }
     if 'index_alert' in data:
-        ia = data['index_alert'] or {}
-        cfg['index_alert'] = {
-            'enabled': bool(ia.get('enabled')),
-            'threshold': float(ia.get('threshold') or 3),
-        }
+        merged = dict(cfg.get('index_alert') or {})
+        merged.update(data['index_alert'] or {})
+        cfg['index_alert'] = _index_alert_cfg({'index_alert': merged})
     if 'index_summary' in data:
         idxs = data['index_summary'] or {}
         cfg['index_summary'] = {
             'enabled': bool(idxs.get('enabled')),
-            'time': str(idxs.get('time') or '20:00'),
+            'time': str(idxs.get('time') or '17:00'),
         }
     if 'us_index_summary' in data:
         usix = data['us_index_summary'] or {}
@@ -1206,7 +1382,11 @@ def api_config():
         norm = _intraday_cfg({'intraday_brief': ib})
         cfg['intraday_brief'] = norm
     if 'email' in data:
-        cfg['email'] = data['email']
+        e = dict(data['email'] or {})
+        old = cfg.get('email') or {}
+        if not (e.get('password') or '').strip() or e.get('password') == SECRET_MASK:
+            e['password'] = old.get('password')   # 留空 = 不改授权码
+        cfg['email'] = e
     save_config(cfg)
     return jsonify({'ok': True})
 
@@ -1313,7 +1493,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.27', 'commit': 'us-summary-dedup'})
+    return jsonify({'version': '3.28', 'commit': 'push-aggregate-us-fix'})
 
 
 @app.route('/api/threads')

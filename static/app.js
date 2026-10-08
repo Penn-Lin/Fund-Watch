@@ -39,7 +39,7 @@ const RULE_TEXT = { daily: '当日涨跌', cumulative: '累计节点' };
 const KIND_TEXT = {
   daily: '当日阈值', cum_estimate: '累计估值预警', cum_confirm: '累计净值确认',
   daily_summary: '收盘汇总', index_threshold: '指数阈值', index_summary: '指数汇总',
-  us_index_summary: '美股汇总', intraday_brief: '盘中快报',
+  us_index_summary: '美股汇总', intraday_brief: '盘中快报', index_batch: '指数提醒',
 };
 
 /* ---------------- Tab 切换（底部导航） ---------------- */
@@ -958,16 +958,25 @@ $('#alert-filter-row').addEventListener('click', (e) => {
 });
 
 /* ---------------- 通知设置 ---------------- */
+// 接口不下发明文密钥（见后端 _config_for_client），只给"是否已配置"。
+// 已配置的字段留空 → 保存时保留原值；想换就直接填新的。
+const SECRET_KEEP = '已保存（留空保持不变）';
+
 async function loadConfig() {
   const cfg = await api('/api/config');
-  $('#cf-sk').value = cfg.serverchan_sendkey || '';
-  $('#cf-pt').value = cfg.pushplus_token || '';
+  const set = cfg.secrets_set || {};
+  const wire = (el, configured) => {
+    el.value = '';
+    el.placeholder = configured ? SECRET_KEEP : '';
+  };
+  wire($('#cf-sk'), set.serverchan);
+  wire($('#cf-pt'), set.pushplus);
+  wire($('#cf-pass'), set.email_password);
   const e = cfg.email || {};
   $('#cf-host').value = e.smtp_host || '';
   $('#cf-port').value = e.smtp_port || 465;
   $('#cf-ssl').checked = e.use_ssl !== false;
   $('#cf-user').value = e.username || '';
-  $('#cf-pass').value = e.password || '';
   $('#cf-to').value = (e.to_addrs || []).join(',');
   $('#cf-in').value = cfg.scan_interval_seconds || 60;
   $('#cf-off').value = cfg.off_hours_interval_seconds || 600;
@@ -975,10 +984,11 @@ async function loadConfig() {
   $('#cf-sum-time').value = ds.time || '20:00';
   $('#cf-sum-on').checked = !!ds.enabled;
   const ixa = cfg.index_alert || {};
-  $('#cf-ixa-th').value = ixa.threshold || 3;
+  $('#cf-ixa-th').value = ixa.threshold || 1;
+  $('#cf-ixa-gap').value = ixa.interval_min || 15;
   $('#cf-ixa-on').checked = !!ixa.enabled;
   const ixs = cfg.index_summary || {};
-  $('#cf-ixs-time').value = ixs.time || '20:00';
+  $('#cf-ixs-time').value = ixs.time || '17:00';
   $('#cf-ixs-on').checked = !!ixs.enabled;
   const usix = cfg.us_index_summary || {};
   $('#cf-usix-time').value = usix.time || '08:00';
@@ -1001,11 +1011,12 @@ $('#btn-save-cfg').addEventListener('click', async () => {
       },
       index_alert: {
         enabled: $('#cf-ixa-on').checked,
-        threshold: parseFloat($('#cf-ixa-th').value) || 3,
+        threshold: parseFloat($('#cf-ixa-th').value) || 1,
+        interval_min: parseInt($('#cf-ixa-gap').value) || 15,
       },
       index_summary: {
         enabled: $('#cf-ixs-on').checked,
-        time: $('#cf-ixs-time').value || '20:00',
+        time: $('#cf-ixs-time').value || '17:00',
       },
       us_index_summary: {
         enabled: $('#cf-usix-on').checked,
@@ -1311,7 +1322,9 @@ let _alertsCache = [];
 // 汇总类消息的数据行长这样：
 //   · 上证指数 -1.18%，3888.11
 //   · 易方达瑞享混合E(001438) +0.58%，净值 9.6893（2026-09-11）
-const SUMMARY_KINDS = ['daily_summary', 'index_summary', 'us_index_summary', 'intraday_brief'];
+// index_batch 是聚合后的指数阈值提醒（一轮一条，列出本轮新穿越的指数），
+// 数据行格式与上面完全一致，所以放进来就能享受同一套色带列表渲染。
+const SUMMARY_KINDS = ['daily_summary', 'index_summary', 'us_index_summary', 'intraday_brief', 'index_batch'];
 
 function parseSummaryLine(line) {
   const m = String(line).match(/^·\s*(.+?)\s*([+-]?\d+(?:\.\d+)?)%，\s*(.*)$/);
