@@ -363,15 +363,17 @@ _US_CLOSED_WINDOW = (430, 2130)
 def _us_session_closed(rows):
     """这一批美股行情代表的那个交易日，是不是**已经收完盘**了。
 
-    判据是行情自带时间戳的**时:分**（美东）：>= 16:00 才算收完。
+    判据是行情自带时间戳的**时:分**（美东），取整批里最新的一个：
+    加进标普500/道琼斯后不能只看第一条 —— 收盘后各指数更新时间能差到
+    16:33 / 16:41 / 17:15，「这条 >= 16:00」比「第一条 >= 16:00」稳。
     美东 09:30-16:00 之间字段时间是盘中时间，说明这一场还在交易中 ——
     此时不能推"昨夜收盘"，否则推的是刚开盘没几分钟的行情。
-    fail-closed：时间取不到就当作"没收"，宁可晚一轮也不推错数据。
+    fail-closed：时间全部取不到就当作"没收"，宁可晚一轮也不推错数据。
     """
-    hm = rows[0].get('quote_hhmm') if rows else None
-    if hm is None:
+    hms = [r.get('quote_hhmm') for r in rows if r.get('quote_hhmm') is not None]
+    if not hms:
         return False
-    return hm >= 1600
+    return max(hms) >= 1600
 
 
 def _in_us_closed_window(now):
@@ -393,10 +395,12 @@ def _build_us_index_summary_message():
     rows = _us_index_rows()
     if not rows:
         return None, 0, None
-    # 一条汇总只描述一个美股交易日，用第一条的行情日期做标识
-    qd = rows[0].get('quote_date') or ''
-    if not qd:
+    # 一条汇总只描述一个美股交易日，用整批里最新的行情日期做标识
+    # （三个指数同日，取 max 防个别指数数据滞后）
+    qds = [r.get('quote_date') for r in rows if r.get('quote_date')]
+    if not qds:
         return None, 0, None   # fail-closed：日期取不到就不发，宁可晚一轮
+    qd = max(qds)
     lines = []
     for ix in rows:
         chg = ix.get('change_pct')
@@ -1184,13 +1188,56 @@ def api_history():
 
 # ------------------------- 概览统计 -------------------------
 
+# 各市场连续竞价时段（含午休，只在"是否进行中"这个粒度上判断，够用）
+_MARKET_SESSION_HOURS = {'cn': (930, 1500), 'hk': (930, 1600)}
+SESSION_LABELS = {'trading': '交易中', 'closed': '已收盘',
+                  'pre': '待开盘', 'holiday': '休市'}
+
+
+def _index_session(ix, now):
+    """展示用的交易状态（只给 /api/indices，不参与任何推送判定）
+
+    - A股：交易日历来自 rule_engine（节假日显示"休市"）
+    - 港股：没有日历，用"行情日期是否今天"兜底 —— 盘中无今日行情 = 休市，
+      恰好覆盖香港假期；周末直接判休市
+    - 美股：行情时间戳是美东时间，>= 16:00 即这一场已收盘，北京白天看到的
+      "已收盘"就是最近一个交易日的结果，符合预期
+    """
+    market = ix.get('market') or 'cn'
+    qd = ix.get('quote_date') or ''
+    hm = ix.get('quote_hhmm')
+    today = rule_engine.today_str()
+    now_hm = now.hour * 100 + now.minute
+
+    if market == 'us':
+        if hm is None or hm >= 1600:
+            return 'closed'
+        return 'pre' if hm < 930 else 'trading'
+
+    if market == 'cn' and not rule_engine.is_trading_day(now):
+        return 'holiday'
+    if market == 'hk' and now.weekday() >= 5:
+        return 'holiday'
+    open_hm, close_hm = _MARKET_SESSION_HOURS.get(market, (930, 1500))
+    if now_hm < open_hm:
+        return 'pre'
+    if now_hm <= close_hm:
+        return 'trading' if qd == today else 'holiday'
+    return 'closed'
+
+
 @app.route('/api/indices')
 def api_indices():
-    """指数实时行情（60 秒内存缓存，不入库不参与预警）"""
+    """指数实时行情（60 秒内存缓存，不入库不参与预警）+ 展示用交易状态"""
     try:
-        return jsonify(fund_data.fetch_indices())
+        indices = [dict(ix) for ix in fund_data.fetch_indices()]
     except Exception:
         return jsonify([])
+    now = rule_engine.now()
+    for ix in indices:
+        key = _index_session(ix, now)
+        ix['session'] = {'key': key, 'label': SESSION_LABELS[key]}
+    return jsonify(indices)
 
 
 @app.route('/api/index_history')
@@ -1493,7 +1540,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.28', 'commit': 'push-aggregate-us-fix'})
+    return jsonify({'version': '3.29', 'commit': 'index-market-groups'})
 
 
 @app.route('/api/threads')

@@ -85,18 +85,58 @@ async function loadIndices() {
   } catch (e) { /* 静默，保留上次数据 */ }
 }
 
+/* 市场分区顺序与名称（与后端 fund_data.INDEX_GROUPS 对应） */
+const IX_MARKETS = [
+  { key: 'cn', label: 'A股' },
+  { key: 'hk', label: '港股' },
+  { key: 'us', label: '美股' },
+];
+
+/** market 字段缺失时按 secid 前缀兜底（旧缓存/降级响应也不能错分组） */
+function ixMarket(ix) {
+  if (ix.market) return ix.market;
+  const s = ix.secid || '';
+  if (s.indexOf('us') === 0) return 'us';
+  if (s.indexOf('hk') === 0) return 'hk';
+  return 'cn';
+}
+
+/** 段头右侧的交易状态胶囊（用组内第一条的状态代表整个市场） */
+function ixStatusPill(items) {
+  const s = items[0] && items[0].ix.session;
+  if (!s || !s.label) return '';
+  return `<span class="ix-pill ix-pill-${esc(s.key || 'closed')}">${esc(s.label)}</span>`;
+}
+
 function renderIndices() {
   const box = $('#index-strip');
   if (!_indices.length) {
     box.innerHTML = '<span class="ix-empty">指数加载中…</span>';
     return;
   }
-  box.innerHTML = _indices.map((ix, i) => `
-    <button class="ix-card" data-ix="${i}">
-      <div class="ix-name">${esc(ix.name)}</div>
-      <div class="ix-val">${num(ix.price)}</div>
-      <div class="ix-chg ${cls(ix.change_pct)}">${pct(ix.change_pct)}</div>
-    </button>`).join('');
+  // 按市场分组渲染：段头（市场名 + 状态）→ 网格；段与段之间细线分隔。
+  // 网格用 6 轨道 + span 控制列数（详见 style.css），数据全在一屏内，不再横滑。
+  const groups = IX_MARKETS.map((m) => ({
+    label: m.label,
+    items: _indices.map((ix, i) => ({ ix, i }))
+      .filter((r) => ixMarket(r.ix) === m.key),
+  })).filter((g) => g.items.length);
+
+  box.innerHTML = groups.map((g, gi) => `
+    ${gi ? '<div class="ix-sep"></div>' : ''}
+    <div class="ix-group">
+      <div class="ix-group-head">
+        <span class="ix-group-name">${esc(g.label)}${ixStatusPill(g.items)}</span>
+      </div>
+      <div class="ix-grid" data-count="${g.items.length}">
+        ${g.items.map((r) => `
+        <button class="ix-cell" data-ix="${r.i}">
+          <div class="ix-name">${esc(r.ix.name)}</div>
+          <div class="ix-val">${num(r.ix.price)}</div>
+          <div class="ix-chg ${cls(r.ix.change_pct)}">${pct(r.ix.change_pct)}</div>
+        </button>`).join('')}
+      </div>
+    </div>`).join('');
 }
 
 /* ---------------- 指数详情（行情 + 走势图） ----------------
@@ -172,7 +212,7 @@ function ixHeroHTML(ix) {
     <div class="ixs-hero-l">
       <div class="ixs-name">${esc(ix.name)}<span class="ixs-secid">${esc(ix.secid)}</span></div>
       <div class="ixs-price">${num(ix.price)}</div>
-      <div class="ixs-time">${esc(fmtQuoteTime(ix.quote_time))} 行情</div>
+      <div class="ixs-time">${esc(fmtQuoteTime(ix.quote_time))} 行情${ixMarket(ix) === 'us' ? '（美东）' : ''}</div>
     </div>
     <div class="ixs-hero-r">
       <div class="ixs-big ${c}">${pct(ix.change_pct)}</div>
@@ -472,7 +512,7 @@ async function openIxDetail(ix) {
 }
 
 $('#index-strip').addEventListener('click', (e) => {
-  const card = e.target.closest('.ix-card');
+  const card = e.target.closest('.ix-cell');
   if (!card) return;
   const ix = _indices[+card.dataset.ix];
   if (!ix) return;

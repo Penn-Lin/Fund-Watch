@@ -23,16 +23,28 @@ INDEX_URL = 'https://qt.gtimg.cn/q='
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
 # 首页指数版块（腾讯行情 secid：sh/sz=沪/深，hk=港，us=美）
-INDEX_LIST = [
-    ('sh000001', '上证指数'),
-    ('sz399001', '深证成指'),
-    ('sz399006', '创业板指'),
-    ('sh000300', '沪深300'),
-    ('sh000688', '科创50'),
-    ('hkHSI', '恒生指数'),
-    ('hkHSTECH', '恒生科技'),
-    ('usNDX', '纳斯达克100'),
+# 按市场分组：前端主页按组分区渲染，/api/indices 每条带 market 字段（cn/hk/us）。
+# 加指数只改这里 —— 白名单/名称映射/走势图权限/前端分组全部自动跟随。
+INDEX_GROUPS = [
+    {'key': 'cn', 'label': 'A股', 'items': [
+        ('sh000001', '上证指数'),
+        ('sz399001', '深证成指'),
+        ('sz399006', '创业板指'),
+        ('sh000300', '沪深300'),
+        ('sh000688', '科创50'),
+    ]},
+    {'key': 'hk', 'label': '港股', 'items': [
+        ('hkHSI', '恒生指数'),
+        ('hkHSTECH', '恒生科技'),
+    ]},
+    {'key': 'us', 'label': '美股', 'items': [
+        ('usINX', '标普500'),      # 腾讯 secid 是 usINX（= .INX），不是 usSPX
+        ('usNDX', '纳斯达克100'),
+        ('usDJI', '道琼斯'),
+    ]},
 ]
+INDEX_LIST = [(s, n) for g in INDEX_GROUPS for s, n in g['items']]
+MARKET_BY_SECID = {s: g['key'] for g in INDEX_GROUPS for s, _ in g['items']}
 
 _index_cache = {'ts': 0.0, 'data': []}
 
@@ -370,6 +382,7 @@ def fetch_indices(max_age=60.0):
                 amp = (high - low) / pre_close * 100.0
             out.append({
                 'secid': key, 'code': parts[2], 'name': name,
+                'market': MARKET_BY_SECID.get(key),
                 'price': price,
                 'change_pct': _f(parts[32]),
                 'change_amt': _f(parts[31]),

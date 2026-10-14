@@ -351,7 +351,11 @@ main { padding: 14px 14px 96px; }
 .down { color: var(--green); }
 .flat { color: var(--text-2); }
 
-/* ===== 指数横滑条 ===== */
+/* ===== 指数分区（A股 / 港股 / 美股） =====
+   一行横滑在 8 个指数时已经偏挤，加到 10 个后改为按市场分段 + 网格铺开：
+   全部指数一眼可见、格子更大更好点。网格用 6 轨道 + span 控制列数：
+   3 个 = 一行三格（span 2）；2 个 / 4 个 = 各半（span 3）；
+   A股 5 个 = 3 + 2（第二行两格撑满，不留空洞）。 */
 .index-strip-box {
   background: var(--card); border-radius: 16px; box-shadow: var(--shadow);
   padding: 12px 14px 10px; margin-bottom: 14px;
@@ -360,21 +364,45 @@ main { padding: 14px 14px 96px; }
   font-size: 12px; color: var(--text-2); font-weight: 600;
   margin-bottom: 10px; letter-spacing: .3px;
 }
-.index-strip {
-  display: flex; gap: 10px; overflow-x: auto;
-  scrollbar-width: none; -webkit-overflow-scrolling: touch;
-  padding-bottom: 2px;
-}
-.index-strip::-webkit-scrollbar { display: none; }
+.index-strip { display: flex; flex-direction: column; }
 
-.ix-card {
-  flex-shrink: 0; width: 88px; border: none; background: #f8f9fb;
-  border-radius: 12px; padding: 9px 8px 8px; cursor: pointer;
+.ix-group-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 2px 0 8px;
+}
+.ix-group-name {
+  font-size: 12px; font-weight: 600; color: var(--text);
+  display: flex; align-items: center; gap: 6px;
+}
+/* 交易状态胶囊：只承担"状态"，不占涨跌红绿；进行中用琥珀，其余中性灰 */
+.ix-pill {
+  font-size: 10.5px; font-weight: 400; border-radius: 99px;
+  padding: 1px 8px 1px 7px; display: inline-flex; align-items: center; gap: 4px;
+  color: var(--text-2); background: var(--track); letter-spacing: 0;
+}
+.ix-pill::before {
+  content: ''; width: 5px; height: 5px; border-radius: 50%; background: #c3c8cf;
+}
+.ix-pill-trading { color: var(--amber); background: var(--amber-bg); }
+.ix-pill-trading::before { background: #e0932a; }
+.ix-sep { height: 1px; background: var(--border); margin: 10px 0; }
+
+.ix-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.ix-cell {
+  grid-column: span 2; min-width: 0; border: none; background: #f8f9fb;
+  border-radius: 10px; padding: 8px 9px; cursor: pointer;
   display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
   transition: transform .15s, background .15s; text-align: left;
 }
-.ix-card:active { transform: scale(.96); background: #f0f2f5; }
-.ix-name { font-size: 11px; color: var(--text-2); line-height: 1.2; }
+.ix-cell:active { transform: scale(.97); background: #f0f2f5; }
+.ix-grid[data-count="2"] .ix-cell,
+.ix-grid[data-count="4"] .ix-cell { grid-column: span 3; }
+.ix-grid[data-count="5"] .ix-cell:nth-child(n+4) { grid-column: span 3; }
+
+.ix-name {
+  font-size: 11px; color: var(--text-2); line-height: 1.2;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .ix-val {
   font-size: 15px; font-weight: 700; color: var(--text);
   font-variant-numeric: tabular-nums; line-height: 1.15;
