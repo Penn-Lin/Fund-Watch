@@ -15,12 +15,66 @@
 import time
 import uuid
 import threading
+import concurrent.futures
 import requests
 
 FUND_INFO_URL = 'https://fundmobapi.eastmoney.com/FundMNewApi/FundMNFInfo'
 HISTORY_URL = 'https://fundmobapi.eastmoney.com/FundMNewApi/FundMNHisNetList'
 INDEX_URL = 'https://qt.gtimg.cn/q='
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
+
+# ---------- 外部请求保护：硬超时 + 按域名熔断 ----------
+#
+# 为什么需要（2026-10-15 事故）：requests 的 timeout **管不到 DNS 解析阶段**。
+# qt.gtimg.cn 从 Render 解析挂起时，请求会无限期卡住 —— gunicorn 只有 8 个工作
+# 线程，几个卡死的请求就把线程占光 → 全站所有接口超时（连 /api/threads 都打不开，
+# 因为拿不到线程）；而且线程永远不会自己释放（DNS 阻塞无法被中断）。
+# 两层保护：
+#   ① 请求丢进独立线程池执行，调用方最多等 hard_timeout 秒（超时返回 None）；
+#   ② 按域名熔断：连续 3 次失败后，120 秒内直接快速失败（不发网络请求），
+#      避免线程池被"慢失败"慢慢耗干。
+# 调用方拿到 None 必须走降级路径（缓存/空结果），绝不能当 Response 用。
+_FETCH_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=6, thread_name_prefix='hg-fetch')
+_BREAKERS = {}           # host -> {'fails': n, 'until': ts}
+_BREAK_LOCK = threading.Lock()
+BREAKER_FAILS = 3
+BREAKER_COOLDOWN = 120.0
+
+
+def _host_of(url):
+    try:
+        return url.split('//', 1)[1].split('/', 1)[0].split(':', 1)[0]
+    except Exception:
+        return url[:40]
+
+
+def _http_get(url, headers=None, params=None, timeout=10, hard_timeout=None):
+    """带硬超时的 GET；失败/熔断时返回 None（调用方按"拿不到数据"降级处理）"""
+    host = _host_of(url)
+    with _BREAK_LOCK:
+        b = _BREAKERS.get(host)
+        if b and b.get('until', 0) > time.time():
+            return None
+    hard = hard_timeout or (timeout + 10)
+
+    def _do():
+        return requests.get(url, params=params, headers=headers, timeout=timeout)
+
+    try:
+        fut = _FETCH_POOL.submit(_do)
+        resp = fut.result(timeout=hard)
+    except Exception:
+        with _BREAK_LOCK:
+            b = _BREAKERS.setdefault(host, {'fails': 0, 'until': 0.0})
+            b['fails'] += 1
+            if b['fails'] >= BREAKER_FAILS:
+                b['until'] = time.time() + BREAKER_COOLDOWN
+                b['fails'] = 0
+        return None
+    with _BREAK_LOCK:
+        _BREAKERS.pop(host, None)
+    return resp
 
 # 首页指数版块（腾讯行情 secid：sh/sz=沪/深，hk=港，us=美）
 # 按市场分组：前端主页按组分区渲染，/api/indices 每条带 market 字段（cn/hk/us）。
@@ -89,7 +143,12 @@ def fetch_funds(codes, retries=2):
                 'product': 'EFund', 'Version': '1', 'deviceid': str(uuid.uuid4()),
                 'Fcodes': fcodes,
             }
-            resp = requests.get(FUND_INFO_URL, params=params, headers=HEADERS, timeout=15)
+            resp = _http_get(FUND_INFO_URL, params=params, headers=HEADERS,
+                             timeout=15, hard_timeout=25)
+            if resp is None:
+                if attempt < retries - 1:
+                    time.sleep(5)
+                continue
             data = resp.json()
             if data.get('ErrCode') != 0:
                 if attempt < retries - 1:
@@ -136,7 +195,12 @@ def fetch_history(code, days=30, retries=2):
                 'plat': 'Android', 'appType': 'ttjj', 'product': 'EFund',
                 'Version': '1', 'deviceid': str(uuid.uuid4()),
             }
-            resp = requests.get(HISTORY_URL, params=params, headers=HEADERS, timeout=15)
+            resp = _http_get(HISTORY_URL, params=params, headers=HEADERS,
+                             timeout=15, hard_timeout=25)
+            if resp is None:
+                if attempt < retries - 1:
+                    time.sleep(5)
+                continue
             data = resp.json()
             if data.get('ErrCode') != 0:
                 if attempt < retries - 1:
@@ -185,7 +249,9 @@ def _sectors_from_tencent(n):
     """返回 (领涨列表, 领跌列表, 错误文本)"""
     try:
         _throttle()
-        r = requests.get(TENCENT_SECTOR_URL, headers=HEADERS, timeout=10)
+        r = _http_get(TENCENT_SECTOR_URL, headers=HEADERS, timeout=10)
+        if r is None:
+            return [], [], '请求失败（网络超时或熔断中）'
         body = (r.text or '')[:180]
         try:
             j = r.json()
@@ -208,8 +274,10 @@ def _fetch_sectors_once(po, n=2):
     """东财单边榜单，返回 (rows, err)"""
     try:
         _throttle()
-        r = requests.get(SECTOR_URL % {'n': n, 'po': po},
-                         headers=SECTOR_HEADERS, timeout=10)
+        r = _http_get(SECTOR_URL % {'n': n, 'po': po},
+                      headers=SECTOR_HEADERS, timeout=10)
+        if r is None:
+            return [], '请求失败（网络超时或熔断中）'
         body = (r.text or '')[:180]
         try:
             j = r.json()
@@ -287,7 +355,9 @@ def fetch_sector_heat():
         return _sector_heat_cache['data']
     try:
         _throttle()
-        r = requests.get(TENCENT_SECTOR_URL, headers=HEADERS, timeout=10)
+        r = _http_get(TENCENT_SECTOR_URL, headers=HEADERS, timeout=10)
+        if r is None:
+            return list(_sector_heat_cache['data'])
         j = r.json()
         rows = []
         for x in ((j.get('data') or {}).get('rank_list') or []):
@@ -346,7 +416,9 @@ def fetch_us_sector_heat():
         return _us_sector_cache['data']
     try:
         codes = ','.join(s for s, _ in US_SECTOR_ETFS)
-        resp = requests.get(INDEX_URL + codes, headers=HEADERS, timeout=10)
+        resp = _http_get(INDEX_URL + codes, headers=HEADERS, timeout=10)
+        if resp is None:
+            return list(_us_sector_cache['data'])
         resp.encoding = 'gbk'
         by_secid = dict(US_SECTOR_ETFS)
         rows = []
@@ -468,7 +540,9 @@ def fetch_indices(max_age=60.0):
         return _index_cache['data']
     try:
         codes = ','.join(s for s, _ in INDEX_LIST)
-        resp = requests.get(INDEX_URL + codes, headers=HEADERS, timeout=10)
+        resp = _http_get(INDEX_URL + codes, headers=HEADERS, timeout=10)
+        if resp is None:
+            return list(_index_cache['data'])
         resp.encoding = 'gbk'  # 腾讯行情接口用 GBK 编码
         out = []
         by_name = dict(INDEX_LIST)
@@ -583,7 +657,9 @@ def fetch_index_kline(secid, days=_KLINE_DAYS, force=False):
         return _tail(hit['rows'], days), None
     try:
         url = '%s?param=%s,day,,,%d,qfq' % (INDEX_KLINE_URL, s, _KLINE_DAYS)
-        r = requests.get(url, headers=HEADERS, timeout=8)
+        r = _http_get(url, headers=HEADERS, timeout=8)
+        if r is None:
+            return _tail(hit.get('rows') or [], days), '日K请求失败（网络超时或熔断中）'
         j = r.json()
         d = (j.get('data') or {}).get(s) or {}
         raw = d.get('qfqday') or d.get('day') or []
@@ -623,7 +699,10 @@ def fetch_index_minute(secid, force=False):
     if hit.get('rows') and not force and now - hit.get('ts', 0) < MINUTE_TTL:
         return hit.get('date') or '', hit['rows'], None
     try:
-        r = requests.get(INDEX_MINUTE_URL + '?code=' + s, headers=HEADERS, timeout=8)
+        r = _http_get(INDEX_MINUTE_URL + '?code=' + s, headers=HEADERS, timeout=8)
+        if r is None:
+            return (hit.get('date') or '', list(hit.get('rows') or []),
+                    '分时请求失败（网络超时或熔断中）')
         j = r.json()
         d = (j.get('data') or {}).get(s) or {}
         inner = d.get('data') or {}
