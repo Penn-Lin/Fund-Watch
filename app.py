@@ -1249,6 +1249,15 @@ def api_sector_heat():
         return jsonify([])
 
 
+@app.route('/api/us_sector_heat')
+def api_us_sector_heat():
+    """美股行业板块快照（SPDR 11 行业 ETF，10 分钟缓存；收盘后数据天然冻结）"""
+    try:
+        return jsonify(fund_data.fetch_us_sector_heat())
+    except Exception:
+        return jsonify([])
+
+
 @app.route('/api/index_history')
 def api_index_history():
     """指数走势（日K + 当日分时），供详情抽屉画图
@@ -1549,7 +1558,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.31', 'commit': 'heat-label-fit'})
+    return jsonify({'version': '3.32', 'commit': 'us-sector-heatmap'})
 
 
 @app.route('/api/threads')

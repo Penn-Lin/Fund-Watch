@@ -535,13 +535,18 @@ $('#ix-mask').addEventListener('click', closeIxSheet);
 
 /* ---------------- 板块热力图 ----------------
  *
- * 31 个申万一级行业做成 treemap（squarified 布局，块尽量接近正方形）：
- *   · 涨跌模式：面积 = 成交额，颜色 = 涨跌幅（红涨绿跌，3.5% 满色）
- *   · 资金模式：面积 = 主力净流入规模，颜色 = 红入绿出
+ * treemap（squarified 布局，块尽量接近正方形），三个视图：
+ *   · 涨跌：A股 31 个申万一级行业，面积 = 成交额，颜色 = 涨跌幅（3.5% 满色）
+ *   · 资金：同 A股，面积 = 主力净流入规模，颜色 = 红入绿出
+ *   · 美股：11 个 SPDR 行业板块，面积 = 板块规模，颜色 = 涨跌幅（3% 满色）；
+ *     美股收盘后行情冻结，白天看到的就是隔夜收盘快照（用户只早上看一眼）
  * 面积不做压缩，保证"大小"真实反映规模；小色块点开可看详情。
  */
-let _heat = [];          // /api/sector_heat 快照
-let _heatMode = 'chg';   // chg=涨跌 flow=资金
+let _heat = [];          // A股：/api/sector_heat 快照
+let _heatUs = [];        // 美股：/api/us_sector_heat 快照
+let _heatUsTs = 0;       // 美股数据拉取时刻（超过 10 分钟再拉）
+let _heatDataTime = '';  // A股快照的抓取时刻 HH:MM（标题旁显示）
+let _heatMode = 'chg';   // chg=涨跌 flow=资金 us=美股
 
 async function loadSectorHeat() {
   try {
@@ -549,11 +554,51 @@ async function loadSectorHeat() {
     if (Array.isArray(rows) && rows.length) {
       _heat = rows;
       const t = new Date();
-      $('#heat-time').textContent =
-        ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2);
-      renderHeat();
+      _heatDataTime = ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2);
+      updateHeatNote();
+      if (_heatMode !== 'us') renderHeat();
     }
   } catch (e) { /* 静默，保留上次数据 */ }
+}
+
+async function loadUsSectorHeat() {
+  try {
+    const rows = await api('/api/us_sector_heat');
+    if (Array.isArray(rows) && rows.length) {
+      _heatUs = rows;
+      _heatUsTs = Date.now();
+      updateHeatNote();
+      if (_heatMode === 'us') renderHeat();
+    }
+  } catch (e) { /* 静默，保留上次数据 */ }
+}
+
+/** 脚注与时间戳随模式切换（美股模式显示隔夜收盘日期） */
+function updateHeatNote() {
+  const note = $('#heat-note');
+  const tm = $('#heat-time');
+  if (!note) return;
+  if (_heatMode === 'us') {
+    note.textContent = '面积 = 板块规模 · 红涨绿跌';
+    const d = _heatUs.length ? (_heatUs[0].quote_date || '') : '';
+    if (tm) tm.textContent = d ? d.slice(5) + ' 收盘' : '';
+  } else {
+    note.textContent = _heatMode === 'flow'
+      ? '面积 = 净流入规模 · 红入绿出' : '面积 = 成交额 · 红涨绿跌';
+    if (tm) tm.textContent = _heatDataTime;
+  }
+}
+
+/** 统一切换模式（按钮点击与"早上自动选美股"共用） */
+function setHeatMode(mode) {
+  if (mode !== 'chg' && mode !== 'flow' && mode !== 'us') return;
+  _heatMode = mode;
+  $$('#heat-seg button').forEach((b) => b.classList.toggle('on', b.dataset.hmode === mode));
+  updateHeatNote();
+  if (mode === 'us' && (!_heatUs.length || Date.now() - _heatUsTs > 600000)) {
+    loadUsSectorHeat();   // 美股数据白天不变，超过 10 分钟才重拉
+  }
+  renderHeat();
 }
 
 /** 颜色线性插值（两个 #rrggbb 之间，t: 0~1） */
@@ -655,22 +700,27 @@ function renderHeat() {
   const svg = $('#heat-svg');
   const body = $('#heat-body');
   if (!svg || !body || body.classList.contains('folded')) return;
-  if (!_heat.length) {
-    svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" font-size="12" fill="#9ca3af">数据加载中…</text>';
+  const mode = _heatMode;
+  const src = mode === 'us' ? _heatUs : _heat;
+  if (!src.length) {
+    svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" font-size="12" fill="#9ca3af">'
+      + (mode === 'us' ? '美股板块加载中…' : '数据加载中…') + '</text>';
     return;
   }
   const W = Math.max(svg.clientWidth || 347, 220);
   const H = 300;
   svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
 
-  const mode = _heatMode;
-  const items = _heat.map((d) => ({
-    d: d,
-    v: mode === 'chg' ? Math.max(d.turnover || 0, 0.5)
-      : Math.max(Math.abs(d.net_in || 0), 0.05),
-  })).sort((a, b) => b.v - a.v);
+  const items = src.map((d) => {
+    let v;
+    if (mode === 'flow') v = Math.max(Math.abs(d.net_in || 0), 0.05);
+    else if (mode === 'us') v = Math.max(d.scale || 0, 1);
+    else v = Math.max(d.turnover || 0, 0.5);
+    return { d: d, v: v };
+  }).sort((a, b) => b.v - a.v);
   const rects = heatSquarify(items, W, H);
-  const maxFlow = Math.max.apply(null, _heat.map((d) => Math.abs(d.net_in || 0))) || 1;
+  const maxFlow = Math.max.apply(null,
+    src.map((d) => Math.abs(d.net_in || 0))) || 1;
 
   const parts = [];
   rects.forEach((r) => {
@@ -678,19 +728,20 @@ function renderHeat() {
     const x = r.x + gap / 2, y = r.y + gap / 2;
     const w = Math.max(r.w - gap, 1), h = Math.max(r.h - gap, 1);
     let fill, white, val;
-    if (mode === 'chg') {
-      const t = Math.min(Math.abs(d.chg) / 3.5, 1);
-      fill = Math.abs(d.chg) < 0.15 ? '#eef0f3'
-        : (d.chg > 0 ? heatMix('#f7dbd8', '#e0342f', t) : heatMix('#d5ebde', '#0a9d5c', t));
-      white = t >= 0.5;
-      val = (d.chg > 0 ? '+' : '') + d.chg.toFixed(2) + '%';
-    } else {
+    if (mode === 'flow') {
       const f = d.net_in || 0;
       const t = Math.min(Math.abs(f) / maxFlow, 1);
       fill = Math.abs(f) < 0.5 ? '#eef0f3'
         : (f > 0 ? heatMix('#f7dbd8', '#e0342f', t) : heatMix('#d5ebde', '#0a9d5c', t));
       white = t >= 0.5;
       val = (f > 0 ? '+' : '') + heatYi(f);
+    } else {
+      // 涨跌 / 美股：颜色 = 涨跌幅（美股板块波动比 A股 小，3% 满色）
+      const t = Math.min(Math.abs(d.chg) / (mode === 'us' ? 3 : 3.5), 1);
+      fill = Math.abs(d.chg) < 0.15 ? '#eef0f3'
+        : (d.chg > 0 ? heatMix('#f7dbd8', '#e0342f', t) : heatMix('#d5ebde', '#0a9d5c', t));
+      white = t >= 0.5;
+      val = (d.chg > 0 ? '+' : '') + d.chg.toFixed(2) + '%';
     }
     const cx = x + w / 2, cy = y + h / 2;
     const tc = white ? '#fff' : '#26303c';
@@ -722,9 +773,33 @@ function netTxt(v) {
 }
 
 function openSectorDetail(name) {
-  const d = _heat.find((x) => x.name === name);
+  const isUs = _heatMode === 'us';
+  const d = (isUs ? _heatUs : _heat).find((x) => x.name === name);
   if (!d) return;
   $('#sec-title').textContent = d.name;
+  if (isUs) {
+    const dsc = d.quote_date || '';
+    $('#sec-body').innerHTML = `
+  <div class="sec-hero">
+    <div>
+      <div class="sec-name">${esc(d.name)}</div>
+      <div class="sec-sub">美股行业板块 · SPDR ETF</div>
+    </div>
+    <div class="sec-chg ${cls(d.chg)}">${pct(d.chg)}</div>
+  </div>
+  <div class="sec-flow">
+    <span class="k">板块规模</span>
+    <b class="v">${heatYi(d.scale)}</b>
+  </div>
+  <div class="sec-grid">
+    <div class="sec-cell"><div class="k">成交额</div><div class="v">${heatYi(d.amount)}</div></div>
+    <div class="sec-cell"><div class="k">最新价</div><div class="v">$${num(d.price)}</div></div>
+    <div class="sec-cell" style="grid-column:span 2"><div class="k">数据时间</div>
+      <div class="v" style="font-size:13px">${esc(dsc)} 收盘（美东）· 隔夜数据</div></div>
+  </div>`;
+    openSheet('sec');
+    return;
+  }
   $('#sec-body').innerHTML = `
   <div class="sec-hero">
     <div>
@@ -758,11 +833,7 @@ $('#heat-svg').addEventListener('click', (e) => {
 $('#heat-seg').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-hmode]');
   if (!btn || btn.classList.contains('on')) return;
-  _heatMode = btn.dataset.hmode;
-  $$('#heat-seg button').forEach((b) => b.classList.toggle('on', b === btn));
-  $('#heat-note').textContent = _heatMode === 'chg'
-    ? '面积 = 成交额 · 红涨绿跌' : '面积 = 净流入规模 · 红入绿出';
-  renderHeat();
+  setHeatMode(btn.dataset.hmode);
 });
 
 const HEAT_FOLD_KEY = 'fundwatch.heatFold';
@@ -776,6 +847,15 @@ $('#heat-fold').addEventListener('click', () => {
   setHeatFold(!$('#heat-body').classList.contains('folded'));
 });
 try { if (localStorage.getItem(HEAT_FOLD_KEY) === '1') setHeatFold(true); } catch (e) { /* 忽略 */ }
+
+/* 早上（美股收盘后至 A股 开盘前）默认展示美股板块 ——
+ * 用户习惯：早上只看一眼"昨夜美股"，之后一整天不看 A股 以外的市场。
+ * 其他时段默认仍是 A股 涨跌；用户点标签可随时切换，选择只在本次会话内有效。 */
+(function () {
+  const n = new Date();
+  const hm = n.getHours() * 100 + n.getMinutes();
+  if (hm >= 500 && hm < 930) setHeatMode('us');
+})();
 
 let _heatRszT = null;
 window.addEventListener('resize', () => {

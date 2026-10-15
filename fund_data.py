@@ -317,6 +317,71 @@ def fetch_sector_heat():
         return list(_sector_heat_cache['data'])
 
 
+# ============ 美股行业板块（SPDR 11 个行业 ETF） ============
+#
+# 与 A 股板块不同：getRank 不支持美股（board_type=us 返回空），改用 SPDR 行业 ETF
+# 的行情来代表板块 —— qt.gtimg.cn 直接可取，且**美股收盘后行情冻结**，
+# 白天看到的天然就是"昨夜收盘"快照（用户场景：只早上看一眼，不需要实时）。
+# 规模 = 份额字段 [71] × 现价 [3]（ETF 专属字段；指数上这个位置无意义，别套用）。
+US_SECTOR_ETFS = [
+    ('usXLK', '科技'), ('usXLF', '金融'), ('usXLV', '医疗'),
+    ('usXLE', '能源'), ('usXLI', '工业'), ('usXLY', '可选消费'),
+    ('usXLP', '必需消费'), ('usXLU', '公用事业'), ('usXLRE', '房地产'),
+    ('usXLB', '材料'), ('usXLC', '通信'),
+]
+
+_us_sector_cache = {'ts': 0.0, 'data': []}
+US_SECTOR_TTL = 600.0   # 美股白天数据不变，10 分钟缓存足够
+
+
+def fetch_us_sector_heat():
+    """美股 11 个行业板块快照（按规模降序），供主页热力图「美股」tab
+
+    每项：name / chg(涨跌%) / scale(规模亿美元) / amount(成交额亿美元) /
+    price / quote_date(美东日期) / quote_hhmm。
+    失败返回上次缓存（可能为空），绝不抛异常。
+    """
+    now = time.time()
+    if _us_sector_cache['data'] and now - _us_sector_cache['ts'] < US_SECTOR_TTL:
+        return _us_sector_cache['data']
+    try:
+        codes = ','.join(s for s, _ in US_SECTOR_ETFS)
+        resp = requests.get(INDEX_URL + codes, headers=HEADERS, timeout=10)
+        resp.encoding = 'gbk'
+        by_secid = dict(US_SECTOR_ETFS)
+        rows = []
+        for line in resp.text.split(';'):
+            line = line.strip()
+            if not line or '=' not in line:
+                continue
+            key, val = line.split('=', 1)
+            key = key.replace('v_', '').strip()
+            name = by_secid.get(key)
+            if not name:
+                continue
+            parts = val.strip().strip('"').split('~')
+            if len(parts) < 72:
+                continue
+            price, chg = _f(parts[3]), _f(parts[32])
+            shares, amount = _f(parts[71]), _f(parts[37])
+            if price is None or chg is None:
+                continue
+            rows.append({
+                'name': name, 'chg': chg,
+                'scale': None if shares is None else round(price * shares / 1e8, 1),
+                'amount': None if amount is None else round(amount / 1e8, 1),
+                'price': price,
+                'quote_date': _quote_date(parts[30]),
+                'quote_hhmm': _quote_hhmm(parts[30]),
+            })
+        if rows:
+            rows.sort(key=lambda r: -(r['scale'] or 0))
+            _us_sector_cache.update(ts=now, data=rows)
+        return _us_sector_cache['data']
+    except Exception:
+        return list(_us_sector_cache['data'])
+
+
 def _quote_date(raw):
     """从腾讯行情的时间字段解析出 YYYY-MM-DD（静态数据判新鲜度用）
 
