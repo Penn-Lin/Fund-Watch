@@ -1240,6 +1240,15 @@ def api_indices():
     return jsonify(indices)
 
 
+@app.route('/api/sector_heat')
+def api_sector_heat():
+    """板块热力图快照（腾讯申万一级 31 行业，60 秒缓存，纯展示不参与预警）"""
+    try:
+        return jsonify(fund_data.fetch_sector_heat())
+    except Exception:
+        return jsonify([])
+
+
 @app.route('/api/index_history')
 def api_index_history():
     """指数走势（日K + 当日分时），供详情抽屉画图
@@ -1540,7 +1549,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.29', 'commit': 'index-market-groups'})
+    return jsonify({'version': '3.30', 'commit': 'sector-heatmap'})
 
 
 @app.route('/api/threads')

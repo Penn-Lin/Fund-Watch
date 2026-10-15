@@ -413,6 +413,81 @@ main { padding: 14px 14px 96px; }
 .ix-chg.flat { color: var(--text-2); }
 .ix-empty { font-size: 12px; color: var(--text-3); padding: 8px 4px; }
 
+/* ===== 板块热力图 =====
+   treemap：面积 = 权重（成交额 / 净流入规模），颜色 = 涨跌或资金方向。
+   面积不做压缩 —— 小板块就是小，靠点击看详情。 */
+.heat-box {
+  background: var(--card); border-radius: 16px; box-shadow: var(--shadow);
+  padding: 12px 14px 10px; margin-bottom: 14px;
+}
+.heat-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px;
+}
+.heat-title {
+  font-size: 12px; color: var(--text-2); font-weight: 600; letter-spacing: .3px;
+  display: flex; align-items: center; gap: 8px;
+}
+.heat-time { font-size: 10.5px; color: var(--text-3); font-weight: 400; letter-spacing: 0; }
+.heat-tools { display: flex; align-items: center; gap: 10px; }
+.seg { display: flex; background: var(--track); border-radius: 8px; padding: 2px; }
+.seg button {
+  border: 0; background: transparent; font-size: 11px; color: var(--text-2);
+  padding: 2px 9px; border-radius: 6px; cursor: pointer; font-family: inherit;
+}
+.seg button.on { background: #fff; color: var(--text); box-shadow: 0 1px 2px rgba(31,35,41,.08); }
+.heat-fold {
+  border: 0; background: none; font-size: 11px; color: var(--text-3);
+  cursor: pointer; padding: 2px 0; font-family: inherit;
+}
+.heat-body.folded { display: none; }
+#heat-svg { display: block; width: 100%; height: 300px; }
+.heat-foot {
+  display: flex; justify-content: space-between; gap: 8px;
+  margin-top: 8px; font-size: 10.5px; color: var(--text-3);
+}
+
+/* ===== 板块详情抽屉 ===== */
+.sec-hero {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border);
+}
+.sec-name { font-size: 16px; font-weight: 700; }
+.sec-sub { font-size: 11px; color: var(--text-3); margin-top: 3px; }
+.sec-chg {
+  font-size: 25px; font-weight: 800; line-height: 1.05;
+  font-variant-numeric: tabular-nums; flex-shrink: 0;
+}
+.sec-chg.up { color: var(--red); }
+.sec-chg.down { color: var(--green); }
+.sec-chg.flat { color: var(--text-2); }
+.sec-flow {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-top: 12px;
+}
+.sec-flow .k { font-size: 12px; color: var(--text-2); }
+.sec-flow .v { font-size: 19px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.sec-flow .v.up { color: var(--red); }
+.sec-flow .v.down { color: var(--green); }
+.sec-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.sec-cell { background: #f8f9fb; border-radius: 10px; padding: 9px 11px; }
+.sec-cell .k { font-size: 11px; color: var(--text-2); }
+.sec-cell .v {
+  font-size: 14.5px; font-weight: 700; color: var(--text);
+  margin-top: 3px; font-variant-numeric: tabular-nums;
+}
+.sec-cell .v.up { color: var(--red); }
+.sec-cell .v.down { color: var(--green); }
+.sec-leader {
+  display: flex; align-items: baseline; gap: 8px; margin-top: 12px;
+  padding: 10px 12px; background: var(--amber-bg); border-radius: 10px;
+}
+.sec-leader .k { font-size: 11px; color: var(--amber); flex-shrink: 0; }
+.sec-leader b { font-size: 13.5px; color: var(--text); font-weight: 600; }
+.sec-leader .v { font-size: 13.5px; font-weight: 700; margin-left: auto; font-variant-numeric: tabular-nums; }
+.sec-leader .v.up { color: var(--red); }
+.sec-leader .v.down { color: var(--green); }
+
 /* ===== 指数详情底部抽屉 ===== */
 .ix-mask {
   position: fixed; inset: 0; z-index: 90;

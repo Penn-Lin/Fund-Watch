@@ -266,6 +266,57 @@ def probe_sectors(n=3):
     return out
 
 
+# 板块热力图：与快报同一个腾讯行业接口，但取**全量 31 个行业 + 全量字段**
+# （快报只要领涨/领跌前 N）。单位统一成前端友好的"亿"：
+# 净流入/成交额原始是万元 → /1e4；流通市值本来就是亿元。
+_sector_heat_cache = {'ts': 0.0, 'data': []}
+SECTOR_HEAT_TTL = 60.0
+
+
+def fetch_sector_heat():
+    """31 个申万一级行业快照（主页热力图用，纯展示）
+
+    每项：name / chg(涨跌%) / net_in(主力净流入亿) / turnover(成交额亿) /
+    mktcap(流通市值亿) / chg5 / chg20 / net_in5 / net_in20 / leader(领涨股) /
+    leader_chg。按成交额降序返回，供前端 treemap 直接用。
+
+    失败返回上次缓存（可能为空列表），绝不抛异常 —— 热力图挂了不能影响其它功能。
+    """
+    now = time.time()
+    if _sector_heat_cache['data'] and now - _sector_heat_cache['ts'] < SECTOR_HEAT_TTL:
+        return _sector_heat_cache['data']
+    try:
+        _throttle()
+        r = requests.get(TENCENT_SECTOR_URL, headers=HEADERS, timeout=10)
+        j = r.json()
+        rows = []
+        for x in ((j.get('data') or {}).get('rank_list') or []):
+            name, chg = x.get('name'), _f(x.get('zdf'))
+            if not name or chg is None:
+                continue
+            net, to = _f(x.get('zljlr')), _f(x.get('turnover'))
+            net5, net20 = _f(x.get('zljlr_d5')), _f(x.get('zljlr_d20'))
+            leader = x.get('lzg') or {}
+            rows.append({
+                'name': name, 'chg': chg,
+                'net_in': None if net is None else round(net / 1e4, 2),
+                'turnover': None if to is None else round(to / 1e4, 1),
+                'mktcap': _f(x.get('ltsz')),
+                'chg5': _f(x.get('zdf_d5')),
+                'chg20': _f(x.get('zdf_d20')),
+                'net_in5': None if net5 is None else round(net5 / 1e4, 2),
+                'net_in20': None if net20 is None else round(net20 / 1e4, 2),
+                'leader': leader.get('name'),
+                'leader_chg': _f(leader.get('zdf')),
+            })
+        if rows:
+            rows.sort(key=lambda r: -(r['turnover'] or 0))
+            _sector_heat_cache.update(ts=now, data=rows)
+        return _sector_heat_cache['data']
+    except Exception:
+        return list(_sector_heat_cache['data'])
+
+
 def _quote_date(raw):
     """从腾讯行情的时间字段解析出 YYYY-MM-DD（静态数据判新鲜度用）
 

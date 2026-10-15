@@ -28,11 +28,13 @@ function grabConst(name) {
 
 const code = ['esc', 'pct', 'cls', 'parseBriefNote', 'briefSubHTML', 'briefSummaryHTML',
   'parseSummaryLine', 'parseAlert',
-  'num', 'fmtHM', 'fmtQuoteTime', 'fmtAmount', 'rangePos', 'periodPct', 'ixZoneText']
+  'num', 'fmtHM', 'fmtQuoteTime', 'fmtAmount', 'rangePos', 'periodPct', 'ixZoneText',
+  'heatMix', 'heatSquarify']
   .map(grab).join('\n') + '\n' + grabConst('briefEmpty') + '\n' + grabConst('SUMMARY_KINDS');
 const M = new Function(code + '\nreturn {esc,pct,cls,parseBriefNote,briefSubHTML,briefSummaryHTML,'
   + 'parseSummaryLine,parseAlert,'
-  + 'num,fmtHM,fmtQuoteTime,fmtAmount,rangePos,periodPct,ixZoneText};')();
+  + 'num,fmtHM,fmtQuoteTime,fmtAmount,rangePos,periodPct,ixZoneText,'
+  + 'heatMix,heatSquarify};')();
 
 const fail = [];
 function ok(label, cond, extra) {
@@ -115,6 +117,32 @@ ok('聚合提醒"共 N 个"行进 notes，不被当数据行',
   pb.notes.length === 1 && pb.notes[0].indexOf('共 2 个指数超') === 0, JSON.stringify(pb.notes));
 ok('聚合提醒标为下跌（浮层色带用）',
   pb.rows.filter((r) => r.pct < 0).length === 2);
+
+// ---- 7. 板块热力图：布局（squarified treemap）与颜色插值 ----
+// 布局坏了会表现为"块叠在一起/跑出画布/面积失真"——不报错但图是坏的，必须钉住。
+// 面积守恒 + 不越界 + 面积与权重成正比：这三条是 treemap 正确性的底线。
+const ITEMS = [
+  { d: { name: '电子' }, v: 100 }, { d: { name: '医药' }, v: 60 },
+  { d: { name: '银行' }, v: 30 }, { d: { name: '综合' }, v: 5 },
+];
+const rects = M.heatSquarify(ITEMS, 300, 200);
+ok('treemap 块数守恒', rects.length === ITEMS.length, String(rects.length));
+const areaSum = rects.reduce((s, r) => s + r.w * r.h, 0);
+ok('treemap 面积守恒（不丢不叠）', Math.abs(areaSum - 300 * 200) < 1, areaSum.toFixed(1));
+ok('treemap 不越界', rects.every((r) => r.x >= -1e-6 && r.y >= -1e-6
+  && r.x + r.w <= 300 + 1e-6 && r.y + r.h <= 200 + 1e-6));
+const ratios = rects.map((r) => Math.max(r.w / r.h, r.h / r.w));
+ok('treemap 块长宽比可控（squarified 的意义）',
+  Math.max.apply(null, ratios) < 5, Math.max.apply(null, ratios).toFixed(2));
+ok('treemap 面积与权重成正比',
+  Math.abs(rects[0].w * rects[0].h / (rects[3].w * rects[3].h) - 100 / 5) < 0.5,
+  (rects[0].w * rects[0].h / (rects[3].w * rects[3].h)).toFixed(2));
+ok('treemap 单块输入不崩', M.heatSquarify([{ d: {}, v: 1 }], 100, 100).length === 1);
+
+ok('颜色插值端点/中点', M.heatMix('#000000', '#ffffff', 0) === '#000000'
+  && M.heatMix('#000000', '#ffffff', 1) === '#ffffff'
+  && M.heatMix('#000000', '#ffffff', 0.5) === '#808080',
+  M.heatMix('#000000', '#ffffff', 0.5));
 
 console.log(fail.length ? '\n失败 ' + fail.length + ' 项: ' + fail.join(' / ') : '\n前端回归全部通过');
 process.exit(fail.length ? 1 : 0);

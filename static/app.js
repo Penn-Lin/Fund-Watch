@@ -533,6 +533,215 @@ function closeIxSheet() {
 }
 $('#ix-mask').addEventListener('click', closeIxSheet);
 
+/* ---------------- 板块热力图 ----------------
+ *
+ * 31 个申万一级行业做成 treemap（squarified 布局，块尽量接近正方形）：
+ *   · 涨跌模式：面积 = 成交额，颜色 = 涨跌幅（红涨绿跌，3.5% 满色）
+ *   · 资金模式：面积 = 主力净流入规模，颜色 = 红入绿出
+ * 面积不做压缩，保证"大小"真实反映规模；小色块点开可看详情。
+ */
+let _heat = [];          // /api/sector_heat 快照
+let _heatMode = 'chg';   // chg=涨跌 flow=资金
+
+async function loadSectorHeat() {
+  try {
+    const rows = await api('/api/sector_heat');
+    if (Array.isArray(rows) && rows.length) {
+      _heat = rows;
+      const t = new Date();
+      $('#heat-time').textContent =
+        ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2);
+      renderHeat();
+    }
+  } catch (e) { /* 静默，保留上次数据 */ }
+}
+
+/** 颜色线性插值（两个 #rrggbb 之间，t: 0~1） */
+function heatMix(a, b, t) {
+  const A = parseInt(a.slice(1), 16), B = parseInt(b.slice(1), 16);
+  const r = Math.round((A >> 16 & 255) + ((B >> 16 & 255) - (A >> 16 & 255)) * t);
+  const g = Math.round((A >> 8 & 255) + ((B >> 8 & 255) - (A >> 8 & 255)) * t);
+  const bl = Math.round((A & 255) + ((B & 255) - (A & 255)) * t);
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + bl).toString(16).slice(1);
+}
+
+/** 亿元格式化（保留符号） */
+function heatYi(v) {
+  if (v === null || v === undefined || !isFinite(v)) return '—';
+  const a = Math.abs(v);
+  return (v < 0 ? '-' : '') + (a >= 10 ? Math.round(a) : a.toFixed(1)) + '亿';
+}
+
+/** squarified treemap（Bruls et al.）：把 value 序列铺成尽量接近正方形的块 */
+function heatSquarify(items, W, H) {
+  const total = items.reduce((s, i) => s + i.v, 0) || 1;
+  const k = W * H / total;
+  const out = [];
+  let x = 0, y = 0, w = W, h = H, i = 0, row = [];
+  const worst = (r) => {
+    const s = r.reduce((a, b) => a + b.a, 0);
+    const side = Math.min(w, h);
+    const mx = Math.max.apply(null, r.map((t) => t.a));
+    const mn = Math.min.apply(null, r.map((t) => t.a));
+    return Math.max(side * side * mx / (s * s), s * s / (side * side * mn));
+  };
+  const flush = () => {
+    if (!row.length) return;
+    const s = row.reduce((a, b) => a + b.a, 0);
+    if (w >= h) {
+      const th = s / h; let oy = y;
+      row.forEach((r) => {
+        const ch = r.a / th;
+        out.push({ d: r.d, x: x, y: oy, w: th, h: ch }); oy += ch;
+      });
+      x += th; w -= th;
+    } else {
+      const th = s / w; let ox = x;
+      row.forEach((r) => {
+        const cw = r.a / th;
+        out.push({ d: r.d, x: ox, y: y, w: cw, h: th }); ox += cw;
+      });
+      y += th; h -= th;
+    }
+    row = [];
+  };
+  while (i < items.length) {
+    const nx = { d: items[i].d, a: items[i].v * k };
+    if (row.length && worst(row.concat([nx])) > worst(row)) { flush(); continue; }
+    row.push(nx); i++;
+  }
+  flush();
+  return out;
+}
+
+function renderHeat() {
+  const svg = $('#heat-svg');
+  const body = $('#heat-body');
+  if (!svg || !body || body.classList.contains('folded')) return;
+  if (!_heat.length) {
+    svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" font-size="12" fill="#9ca3af">数据加载中…</text>';
+    return;
+  }
+  const W = Math.max(svg.clientWidth || 347, 220);
+  const H = 300;
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+
+  const mode = _heatMode;
+  const items = _heat.map((d) => ({
+    d: d,
+    v: mode === 'chg' ? Math.max(d.turnover || 0, 0.5)
+      : Math.max(Math.abs(d.net_in || 0), 0.05),
+  })).sort((a, b) => b.v - a.v);
+  const rects = heatSquarify(items, W, H);
+  const maxFlow = Math.max.apply(null, _heat.map((d) => Math.abs(d.net_in || 0))) || 1;
+
+  const parts = [];
+  rects.forEach((r) => {
+    const d = r.d, gap = 1.2;
+    const x = r.x + gap / 2, y = r.y + gap / 2;
+    const w = Math.max(r.w - gap, 1), h = Math.max(r.h - gap, 1);
+    let fill, white, val;
+    if (mode === 'chg') {
+      const t = Math.min(Math.abs(d.chg) / 3.5, 1);
+      fill = Math.abs(d.chg) < 0.15 ? '#eef0f3'
+        : (d.chg > 0 ? heatMix('#f7dbd8', '#e0342f', t) : heatMix('#d5ebde', '#0a9d5c', t));
+      white = t >= 0.5;
+      val = (d.chg > 0 ? '+' : '') + d.chg.toFixed(2) + '%';
+    } else {
+      const f = d.net_in || 0;
+      const t = Math.min(Math.abs(f) / maxFlow, 1);
+      fill = Math.abs(f) < 0.5 ? '#eef0f3'
+        : (f > 0 ? heatMix('#f7dbd8', '#e0342f', t) : heatMix('#d5ebde', '#0a9d5c', t));
+      white = t >= 0.5;
+      val = (f > 0 ? '+' : '') + heatYi(f);
+    }
+    const cx = x + w / 2, cy = y + h / 2;
+    const tc = white ? '#fff' : '#26303c';
+    let inner = '';
+    if (w >= 52 && h >= 30 && d.name.length * 11 <= w - 8) {
+      inner = `<text x="${cx.toFixed(1)}" y="${(cy - 2.5).toFixed(1)}" font-size="11.5" fill="${tc}" text-anchor="middle" font-weight="600">${esc(d.name)}</text>`
+        + `<text x="${cx.toFixed(1)}" y="${(cy + 12).toFixed(1)}" font-size="11" fill="${tc}" text-anchor="middle" opacity="0.92">${val}</text>`;
+    } else if (w >= 32 && h >= 16 && d.name.length * 11 <= w - 6) {
+      inner = `<text x="${cx.toFixed(1)}" y="${(cy + 4).toFixed(1)}" font-size="11" fill="${tc}" text-anchor="middle">${esc(d.name)}</text>`;
+    }
+    parts.push(`<g data-name="${esc(d.name)}" style="cursor:pointer">`
+      + `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="4" fill="${fill}"/>`
+      + inner + '</g>');
+  });
+  svg.innerHTML = parts.join('');
+}
+
+function netCls(v) {
+  if (v === null || v === undefined) return 'flat';
+  return v > 0 ? 'up' : (v < 0 ? 'down' : 'flat');
+}
+function netTxt(v) {
+  if (v === null || v === undefined) return '—';
+  return (v > 0 ? '+' : '') + heatYi(v);
+}
+
+function openSectorDetail(name) {
+  const d = _heat.find((x) => x.name === name);
+  if (!d) return;
+  $('#sec-title').textContent = d.name;
+  $('#sec-body').innerHTML = `
+  <div class="sec-hero">
+    <div>
+      <div class="sec-name">${esc(d.name)}</div>
+      <div class="sec-sub">申万一级行业</div>
+    </div>
+    <div class="sec-chg ${cls(d.chg)}">${pct(d.chg)}</div>
+  </div>
+  <div class="sec-flow">
+    <span class="k">主力净流入</span>
+    <b class="v ${netCls(d.net_in)}">${netTxt(d.net_in)}</b>
+  </div>
+  <div class="sec-grid">
+    <div class="sec-cell"><div class="k">成交额</div><div class="v">${heatYi(d.turnover)}</div></div>
+    <div class="sec-cell"><div class="k">流通市值</div><div class="v">${fmtAmount((d.mktcap || 0) * 1e8)}</div></div>
+    <div class="sec-cell"><div class="k">近 5 日涨跌</div><div class="v ${cls(d.chg5)}">${pct(d.chg5)}</div></div>
+    <div class="sec-cell"><div class="k">近 20 日涨跌</div><div class="v ${cls(d.chg20)}">${pct(d.chg20)}</div></div>
+    <div class="sec-cell"><div class="k">5 日净流入</div><div class="v ${netCls(d.net_in5)}">${netTxt(d.net_in5)}</div></div>
+    <div class="sec-cell"><div class="k">20 日净流入</div><div class="v ${netCls(d.net_in20)}">${netTxt(d.net_in20)}</div></div>
+  </div>
+  ${d.leader ? `<div class="sec-leader"><span class="k">领涨股</span><b>${esc(d.leader)}</b>`
+    + `<span class="v ${cls(d.leader_chg)}">${pct(d.leader_chg)}</span></div>` : ''}`;
+  openSheet('sec');
+}
+
+$('#heat-svg').addEventListener('click', (e) => {
+  const g = e.target.closest('g[data-name]');
+  if (!g) return;
+  openSectorDetail(g.getAttribute('data-name'));
+});
+$('#heat-seg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-hmode]');
+  if (!btn || btn.classList.contains('on')) return;
+  _heatMode = btn.dataset.hmode;
+  $$('#heat-seg button').forEach((b) => b.classList.toggle('on', b === btn));
+  $('#heat-note').textContent = _heatMode === 'chg'
+    ? '面积 = 成交额 · 红涨绿跌' : '面积 = 净流入规模 · 红入绿出';
+  renderHeat();
+});
+
+const HEAT_FOLD_KEY = 'fundwatch.heatFold';
+function setHeatFold(folded) {
+  $('#heat-body').classList.toggle('folded', folded);
+  $('#heat-fold').textContent = folded ? '展开' : '收起';
+  try { localStorage.setItem(HEAT_FOLD_KEY, folded ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
+  if (!folded) renderHeat();   // 展开时按当前宽度重算布局
+}
+$('#heat-fold').addEventListener('click', () => {
+  setHeatFold(!$('#heat-body').classList.contains('folded'));
+});
+try { if (localStorage.getItem(HEAT_FOLD_KEY) === '1') setHeatFold(true); } catch (e) { /* 忽略 */ }
+
+let _heatRszT = null;
+window.addEventListener('resize', () => {
+  clearTimeout(_heatRszT);
+  _heatRszT = setTimeout(renderHeat, 200);
+});
+
 /* ---------------- 监控列表 ---------------- */
 async function loadFunds() {
   try {
@@ -1686,9 +1895,11 @@ function esc(s) {
 loadFunds();
 loadSummary();
 loadIndices();
+loadSectorHeat();
 initPush();
 pollNewAlerts();
 setInterval(loadFunds, 60000);
 setInterval(loadSummary, 60000);
 setInterval(loadIndices, 60000);   // 指数 60 秒刷新（后端有 60s 缓存，不会打接口）
+setInterval(loadSectorHeat, 60000); // 板块热力图跟随 60 秒刷新（后端同样有 60s 缓存）
 setInterval(pollNewAlerts, 60000); // 每 60 秒检查新提醒，有就从顶部滑入

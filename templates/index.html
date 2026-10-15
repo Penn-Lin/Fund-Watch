@@ -50,6 +50,26 @@
         <div class="strip-title">主要指数</div>
         <div id="index-strip" class="index-strip"></div>
       </div>
+      <!-- ===== 板块热力图（面积=成交额/净流入，颜色=涨跌，点色块看详情） ===== -->
+      <div class="heat-box">
+        <div class="heat-head">
+          <div class="heat-title">板块热力图<span class="heat-time" id="heat-time"></span></div>
+          <div class="heat-tools">
+            <div class="seg" id="heat-seg">
+              <button type="button" class="on" data-hmode="chg">涨跌</button>
+              <button type="button" data-hmode="flow">资金</button>
+            </div>
+            <button type="button" class="heat-fold" id="heat-fold">收起</button>
+          </div>
+        </div>
+        <div class="heat-body" id="heat-body">
+          <svg id="heat-svg" role="img" aria-label="板块热力图（申万一级 31 个行业）"></svg>
+          <div class="heat-foot">
+            <span id="heat-note">面积 = 成交额 · 红涨绿跌</span>
+            <span>点击色块看详情</span>
+          </div>
+        </div>
+      </div>
       <button id="btn-add-open" class="add-open-btn">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         <span>添加基金</span>
@@ -317,6 +337,17 @@
       <button class="sheet-close" data-sheet="ad">×</button>
     </div>
     <div class="sheet-body" id="ad-body"></div>
+  </div>
+
+  <!-- ===== 板块详情抽屉（点击热力图色块打开） ===== -->
+  <div id="sec-mask" class="sheet-mask"></div>
+  <div id="sec-sheet" class="sheet">
+    <div class="sheet-handle"></div>
+    <div class="sheet-head">
+      <h3 id="sec-title">板块详情</h3>
+      <button class="sheet-close" data-sheet="sec">×</button>
+    </div>
+    <div class="sheet-body" id="sec-body"></div>
   </div>
 
   <div id="toast"></div>
