@@ -29,12 +29,12 @@ function grabConst(name) {
 const code = ['esc', 'pct', 'cls', 'parseBriefNote', 'briefSubHTML', 'briefSummaryHTML',
   'parseSummaryLine', 'parseAlert',
   'num', 'fmtHM', 'fmtQuoteTime', 'fmtAmount', 'rangePos', 'periodPct', 'ixZoneText',
-  'heatMix', 'heatSquarify']
+  'heatMix', 'heatSquarify', 'heatTextW', 'heatFitLabel']
   .map(grab).join('\n') + '\n' + grabConst('briefEmpty') + '\n' + grabConst('SUMMARY_KINDS');
 const M = new Function(code + '\nreturn {esc,pct,cls,parseBriefNote,briefSubHTML,briefSummaryHTML,'
   + 'parseSummaryLine,parseAlert,'
   + 'num,fmtHM,fmtQuoteTime,fmtAmount,rangePos,periodPct,ixZoneText,'
-  + 'heatMix,heatSquarify};')();
+  + 'heatMix,heatSquarify,heatTextW,heatFitLabel};')();
 
 const fail = [];
 function ok(label, cond, extra) {
@@ -143,6 +143,21 @@ ok('颜色插值端点/中点', M.heatMix('#000000', '#ffffff', 0) === '#000000'
   && M.heatMix('#000000', '#ffffff', 1) === '#ffffff'
   && M.heatMix('#000000', '#ffffff', 0.5) === '#808080',
   M.heatMix('#000000', '#ffffff', 0.5));
+
+// ---- 8. 热力图文字适配（用户要求"能放下字的尽量都放下，缩小字号没关系"）----
+const f1 = M.heatFitLabel(120, 60, '电子', '-3.37%');
+ok('大块两行（名称+数值）', f1 && f1.mode === 'nv' && f1.fs === 11.5, JSON.stringify(f1));
+const f2 = M.heatFitLabel(40, 18, '综合', '-2.64%');
+ok('中块单行名称', f2 && f2.mode === 'n', JSON.stringify(f2));
+const f3 = M.heatFitLabel(26, 30, '电力设备', '-2.91%');
+ok('小块名称折两行', f3 && f3.mode === 'w' && f3.a === '电力' && f3.b === '设备',
+  JSON.stringify(f3));
+ok('折行会缩小字号', f3.fs <= 10, String(f3.fs));
+ok('极小块返回 null（留纯色）', M.heatFitLabel(12, 12, '综合', '-2.64%') === null);
+ok('宽度估算：中文按字号算', Math.abs(M.heatTextW('综合', 10) - 20) < 1e-6
+  && Math.abs(M.heatTextW('ab', 10) - 12.4) < 1e-6, String(M.heatTextW('ab', 10)));
+ok('折行优先于缩小数值行（小块不显示数值）',
+  M.heatFitLabel(30, 34, '有色金属', '-3.46%').mode === 'w');
 
 console.log(fail.length ? '\n失败 ' + fail.length + ' 项: ' + fail.join(' / ') : '\n前端回归全部通过');
 process.exit(fail.length ? 1 : 0);

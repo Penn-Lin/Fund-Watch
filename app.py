@@ -1549,7 +1549,7 @@ def api_push_ack():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.30', 'commit': 'sector-heatmap'})
+    return jsonify({'version': '3.31', 'commit': 'heat-label-fit'})
 
 
 @app.route('/api/threads')

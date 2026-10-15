@@ -614,6 +614,43 @@ function heatSquarify(items, W, H) {
   return out;
 }
 
+/** 文本宽度估算：中日韩字符 ≈ 字号，ASCII/半角 ≈ 0.62 字号 */
+function heatTextW(s, fs) {
+  let x = 0;
+  for (const c of s) x += c.charCodeAt(0) > 255 ? fs : fs * 0.62;
+  return x;
+}
+
+/** 给色块挑文字方案（用户要求"能放下字的尽量都放下，缩小字号没关系"）：
+ *  字号 11.5→9 逐档尝试：两行(名称+数值) → 单行名称 → 名称折两行；
+ *  全部放不下才留纯色。返回 {fs, mode:'nv'|'n'|'w', a?, b?, lh?} 或 null */
+function heatFitLabel(w, h, name, val) {
+  const sizes = [11.5, 11, 10, 9];
+  for (let i = 0; i < sizes.length; i++) {
+    const fs = sizes[i], lh = fs + 3;
+    if (2 * lh + 4 <= h && heatTextW(name, fs) <= w - 8 && heatTextW(val, fs) <= w - 8) {
+      return { fs: fs, mode: 'nv', lh: lh };
+    }
+  }
+  for (let i = 0; i < sizes.length; i++) {
+    const fs = sizes[i];
+    if (fs + 4 <= h && heatTextW(name, fs) <= w - 6) {
+      return { fs: fs, mode: 'n' };
+    }
+  }
+  for (let i = 0; i < sizes.length; i++) {
+    const fs = sizes[i], lh = fs + 2;
+    if (2 * lh + 2 <= h) {
+      const half = Math.ceil(name.length / 2);
+      const a = name.slice(0, half), b = name.slice(half);
+      if (b && heatTextW(a, fs) <= w - 6 && heatTextW(b, fs) <= w - 6) {
+        return { fs: fs, mode: 'w', a: a, b: b, lh: lh };
+      }
+    }
+  }
+  return null;
+}
+
 function renderHeat() {
   const svg = $('#heat-svg');
   const body = $('#heat-body');
@@ -657,12 +694,16 @@ function renderHeat() {
     }
     const cx = x + w / 2, cy = y + h / 2;
     const tc = white ? '#fff' : '#26303c';
+    const fit = heatFitLabel(w, h, d.name, val);
     let inner = '';
-    if (w >= 52 && h >= 30 && d.name.length * 11 <= w - 8) {
-      inner = `<text x="${cx.toFixed(1)}" y="${(cy - 2.5).toFixed(1)}" font-size="11.5" fill="${tc}" text-anchor="middle" font-weight="600">${esc(d.name)}</text>`
-        + `<text x="${cx.toFixed(1)}" y="${(cy + 12).toFixed(1)}" font-size="11" fill="${tc}" text-anchor="middle" opacity="0.92">${val}</text>`;
-    } else if (w >= 32 && h >= 16 && d.name.length * 11 <= w - 6) {
-      inner = `<text x="${cx.toFixed(1)}" y="${(cy + 4).toFixed(1)}" font-size="11" fill="${tc}" text-anchor="middle">${esc(d.name)}</text>`;
+    if (fit && fit.mode === 'nv') {
+      inner = `<text x="${cx.toFixed(1)}" y="${(cy - fit.lh / 2 + fit.fs * 0.38).toFixed(1)}" font-size="${fit.fs}" fill="${tc}" text-anchor="middle" font-weight="600">${esc(d.name)}</text>`
+        + `<text x="${cx.toFixed(1)}" y="${(cy + fit.lh / 2 + fit.fs * 0.38).toFixed(1)}" font-size="${fit.fs}" fill="${tc}" text-anchor="middle" opacity="0.92">${val}</text>`;
+    } else if (fit && fit.mode === 'n') {
+      inner = `<text x="${cx.toFixed(1)}" y="${(cy + fit.fs * 0.36).toFixed(1)}" font-size="${fit.fs}" fill="${tc}" text-anchor="middle">${esc(d.name)}</text>`;
+    } else if (fit && fit.mode === 'w') {
+      inner = `<text x="${cx.toFixed(1)}" y="${(cy - fit.lh / 2 + fit.fs * 0.36).toFixed(1)}" font-size="${fit.fs}" fill="${tc}" text-anchor="middle">${esc(fit.a)}</text>`
+        + `<text x="${cx.toFixed(1)}" y="${(cy + fit.lh / 2 + fit.fs * 0.36).toFixed(1)}" font-size="${fit.fs}" fill="${tc}" text-anchor="middle">${esc(fit.b)}</text>`;
     }
     parts.push(`<g data-name="${esc(d.name)}" style="cursor:pointer">`
       + `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="4" fill="${fill}"/>`
