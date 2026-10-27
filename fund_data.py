@@ -56,7 +56,7 @@ def _http_get(url, headers=None, params=None, timeout=10, hard_timeout=None):
         b = _BREAKERS.get(host)
         if b and b.get('until', 0) > time.time():
             return None
-    hard = hard_timeout or (timeout + 10)
+    hard = hard_timeout or (timeout + 3)   # 正常 100~300ms，多等几秒足够
 
     def _do():
         return requests.get(url, params=params, headers=headers, timeout=timeout)

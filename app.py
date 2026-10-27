@@ -1555,10 +1555,54 @@ def api_push_ack():
     return jsonify({'ok': True})
 
 
+# ------------------------- 降级：DB 不可用不返回 500 -------------------------
+#
+# 2026-10-27：Render 实例出网整体故障（腾讯/东财/Neon 全部 20s 超时），
+# database.get_conn() 抛 TimeoutError → /api/summary 直接 500，cron-job 和
+# 前端都把它读成"服务异常"。但数据接口"读不到数据" ≠ "服务坏了"：
+# 按路径返回降级数据（200），前端显示空态、cron 不记失败。
+# **只对 DB 不可用类异常降级**，真正的代码 bug 仍然 500（否则会掩盖问题）。
+
+def _is_db_unavailable(e):
+    s = '%s %s' % (type(e).__name__, e)
+    return (isinstance(e, TimeoutError)
+            or 'DB ' in s or 'psycopg' in s.lower()
+            or 'connect' in s.lower() or 'connection' in s.lower())
+
+
+def _db_fallback(path):
+    """按路径给降级数据；返回 None 表示该路径不降级"""
+    if path == '/api/summary':
+        return {'fund_count': 0, 'up_count': 0, 'down_count': 0,
+                'flat_count': 0, 'today_alerts': 0, 'last_scan': None,
+                'db_ok': False}
+    if path == '/api/funds':
+        return []
+    if path == '/api/alerts':
+        return []
+    if path == '/api/config':
+        return dict(database.DEFAULT_CONFIG)
+    if path == '/api/refresh':
+        return {'ok': False, 'error': 'DB 不可用（网络故障），本轮跳过'}
+    return None
+
+
+@app.errorhandler(Exception)
+def _handle_db_unavailable(e):
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    fb = _db_fallback(request.path) if _is_db_unavailable(e) else None
+    if fb is not None:
+        app.logger.warning('DB 不可用，%s 返回降级数据: %s', request.path, e)
+        return jsonify(fb)
+    return 'Internal Server Error', 500
+
+
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.33', 'commit': 'http-hard-timeout-breaker'})
+    return jsonify({'version': '3.34', 'commit': 'db-degrade-on-network-fail'})
 
 
 @app.route('/api/threads')
