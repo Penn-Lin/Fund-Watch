@@ -1,4 +1,58 @@
-# 免费云端部署指南（Render + Neon + cron-job.org）
+# 阿里云 ECS 部署（当前方案）
+
+Ubuntu 24.04 + 本机 PostgreSQL 16 + Caddy（自动 HTTPS）+ systemd，全部脚本在 `deploy/`。
+相比 Render：无冷启动、数据库同机无跨境延迟、可常驻定时扫描。
+
+## 一次性初始化（在本机 PowerShell 执行）
+
+```powershell
+# 0) 免密登录（已生成 d:/... 之外的本机密钥）
+ssh-keygen -t ed25519 -f "$HOME\.ssh\id_fund_aliyun"   # 已有则跳过
+# 把 $HOME\.ssh\id_fund_aliyun.pub 内容加到服务器 root 的 ~/.ssh/authorized_keys
+# （阿里云控制台 → 远程连接/Workbench 里粘贴，或实例创建时选密钥对）
+
+# 1) 上传代码（排除本地虚拟环境与数据）
+$IP = "<公网IP>"
+scp -i "$HOME\.ssh\id_fund_aliyun" -r .\* root@${IP}:/opt/fund-monitor/
+# 或用 rsync（若本机装了 Git Bash / WSL）
+rsync -avz -e "ssh -i $HOME/.ssh/id_fund_aliyun" --exclude venv --exclude data --exclude .git ./ root@${IP}:/opt/fund-monitor/
+
+# 2) 初始化（装包、建库、venv、systemd、Caddy HTTPS）
+ssh -i "$HOME\.ssh\id_fund_aliyun" root@${IP} "bash /opt/fund-monitor/deploy/setup.sh ${IP}"
+
+# 3) 迁移 Neon 数据（可选）
+ssh -i "$HOME\.ssh\id_fund_aliyun" root@${IP} "cd /opt/fund-monitor && sudo -u fund NEON_URL='<Neon连接串>' venv/bin/python deploy/migrate.py"
+```
+
+阿里云安全组入方向需放行：`22`、`443`（IP 证书验证用）、`8443`（保底 HTTP 入口）。
+
+## 日常更新
+
+```powershell
+rsync -avz -e "ssh -i $HOME/.ssh/id_fund_aliyun" --exclude venv --exclude data --exclude .env ./ root@${IP}:/opt/fund-monitor/
+ssh -i "$HOME\.ssh\id_fund_aliyun" root@${IP} "bash /opt/fund-monitor/deploy/update.sh"
+```
+
+## 常用运维
+
+```bash
+systemctl status fund-monitor        # 服务状态
+journalctl -u fund-monitor -f        # 实时日志
+systemctl restart fund-monitor       # 重启
+tail -f /var/log/caddy/fund-monitor.log  # 反代访问日志
+```
+
+## HTTPS 说明
+
+- `setup.sh <公网IP>` 会写 `/etc/caddy/Caddyfile`：443 + LE 短周期 IP 证书（6 天，自动续），
+  同时保留 `:8443` HTTP 保底入口。证书签不下来时仍能进 8443。
+- 证书状态：`journalctl -u caddy -n 50` / `ls /var/lib/caddy/.local/share/caddy/certificates`
+- 别删 `/var/lib/caddy`，删掉会重申请并触发 LE 限速。
+- 纯 HTTP（8443）下 Service Worker / Web Push 不可用，系统级推送必须走 443 HTTPS。
+
+---
+
+# 旧方案：免费云端部署指南（Render + Neon + cron-job.org）
 
 三件套全免费，部署后任何设备浏览器可访问，提醒 24 小时照常推送。
 

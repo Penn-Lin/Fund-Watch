@@ -1,0 +1,43 @@
+# 阶段二：裸 IP + Let's Encrypt 短周期证书
+#
+# 由 deploy/setup.sh 自动把 __PUBLIC_IP__ 替换成真实公网 IP 后写入
+# /etc/caddy/Caddyfile。手动改法：
+#   sed 's/__PUBLIC_IP__/你的公网IP/' deploy/Caddyfile.ip-https > /etc/caddy/Caddyfile
+#   systemctl reload caddy
+#
+# 前提：443 必须能从公网访问（LE 对 IP 只支持 TLS-ALPN-01 验证），
+#      阿里云安全组入方向要放行 443。
+#
+# 证书 6 天有效，Caddy 每 2 天自动续。别删 /var/lib/caddy，
+# 那里面是证书和 ACME 账号状态，删了要重申请，会撞 LE 限速。
+
+__PUBLIC_IP__ {
+	tls {
+		profile shortlived
+	}
+	encode gzip zstd
+	reverse_proxy 127.0.0.1:8000 {
+		header_up X-Real-IP {http.request.remote.host}
+	}
+	log {
+		output file /var/log/caddy/fund-monitor.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+	}
+}
+
+# 保底入口：万一证书签不下来（443 被拦 / LE 限速），
+# 还能用 http://IP:8443 进来，不至于完全进不去。
+:8443 {
+	encode gzip zstd
+	reverse_proxy 127.0.0.1:8000 {
+		header_up X-Real-IP {http.request.remote.host}
+	}
+	log {
+		output file /var/log/caddy/fund-monitor-8443.log {
+			roll_size 10MiB
+			roll_keep 2
+		}
+	}
+}

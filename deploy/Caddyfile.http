@@ -1,0 +1,17 @@
+# 阶段一：纯 HTTP，非标端口 8443
+# 用途：备案/HTTPS 还没搞定前，先用它把服务跑起来验证功能
+# 访问：http://<公网IP>:8443
+# 注意：HTTP 下浏览器不给 Service Worker / Web Push，系统级推送用不了。
+
+:8443 {
+	encode gzip zstd
+	reverse_proxy 127.0.0.1:8000 {
+		header_up X-Real-IP {http.request.remote.host}
+	}
+	log {
+		output file /var/log/caddy/fund-monitor.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+	}
+}
