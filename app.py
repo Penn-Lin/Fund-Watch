@@ -1366,7 +1366,7 @@ def api_delete_alert(aid):
 # Server酱 SendKey（可给你的微信推任意消息）、VAPID 私钥（可伪造推送给你的设备）。
 # GET 只回空串 + 一个"是否已配置"的布尔，前端用 placeholder 提示"留空保持不变"；
 # POST 时留空（或回传掩码）→ 保留库里已有的值，避免保存设置把密钥清空。
-SECRET_KEYS = ('serverchan_sendkey', 'pushplus_token')
+SECRET_KEYS = ('serverchan_sendkey', 'pushplus_token', 'wecom_webhook')
 SECRET_MASK = '••••••••'
 
 
@@ -1377,6 +1377,8 @@ def _config_secret_flags(cfg):
         'pushplus': bool((cfg.get('pushplus_token') or '').strip()),
         'email_password': bool((ec.get('password') or '').strip()),
         'vapid': bool((cfg.get('vapid') or {}).get('private_key')),
+        # webhook 的 key 就是凭证，泄露即可被他人往群里发消息，按机密处理
+        'wecom': bool((cfg.get('wecom_webhook') or '').strip()),
     }
 
 

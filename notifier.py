@@ -42,6 +42,41 @@ def send_pushplus(token, title, content):
     return r.json().get('code') == 200
 
 
+# 企业微信 markdown 内容上限 4096 字节；留 100 字节余量给标题和截断提示。
+WECOM_MAX_BYTES = 4000
+
+
+def send_wecom(webhook, title, content):
+    """企业微信群机器人。
+
+    webhook 形如 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
+    它比 PushPlus 可靠的地方：无每日额度、不经第三方中转、秒级到达。
+
+    两个硬限制：
+      1) markdown 内容 ≤ 4096 字节 —— 板块/指数多时消息可能超，这里按字节截断，
+         并保证不会把多字节中文字符劈成半个（decode(errors='ignore')）。
+      2) 每分钟 ≤ 20 条 —— 我们一天也就几条，碰不到。
+
+    errcode != 0 时主动抛异常，让 send_alert 的 except 把真实原因写进
+    `wecom_error`，这样 /api/test_notify 能直接看到是 key 失效还是被限流。
+    """
+    body = (content or '').strip()
+    text = '**%s**\n%s' % (title, body)
+    if len(text.encode('utf-8')) > WECOM_MAX_BYTES:
+        raw = text.encode('utf-8')[:WECOM_MAX_BYTES - 100]
+        text = raw.decode('utf-8', 'ignore') + '\n…（内容过长已截断）'
+
+    r = requests.post(
+        webhook,
+        json={'msgtype': 'markdown', 'markdown': {'content': text}},
+        timeout=10)
+    d = r.json()
+    if d.get('errcode') != 0:
+        raise RuntimeError('wecom errcode=%s %s' % (d.get('errcode'), d.get('errmsg')))
+    return True
+
+
+
 def send_email(ec, title, content):
     msg = MIMEText(content, 'plain', 'utf-8')
     msg['Subject'] = title
@@ -174,6 +209,9 @@ def send_alert(cfg, title, content):
     pt = (cfg.get('pushplus_token') or '').strip()
     if pt:
         jobs['pushplus'] = lambda: send_pushplus(pt, title, content)
+    ww = (cfg.get('wecom_webhook') or '').strip()
+    if ww:
+        jobs['wecom'] = lambda: send_wecom(ww, title, content)
     ec = cfg.get('email') or {}
     email_key = '%s:%s:%s' % (ec.get('smtp_host'), ec.get('smtp_port'), ec.get('username'))
     if _email_block['key'] != email_key:

@@ -215,12 +215,15 @@ assert _us_win(2026, 10, 8, 2, 0) is False, '凌晨 02:00 美股还在交易'
 # 7d. 接口不下发明文密钥
 cf = app_mod._config_for_client({'serverchan_sendkey': 'SCTxxx',
                                  'pushplus_token': 'tok',
+                                 'wecom_webhook': 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=SECRET',
                                  'email': {'password': 'authcode', 'username': 'a@b.c'},
                                  'vapid': {'private_key': 'PRIVATE'}})
 assert cf['serverchan_sendkey'] == '' and cf['pushplus_token'] == ''
+assert cf['wecom_webhook'] == '', 'webhook 的 key 就是凭证，不能下发前端'
 assert cf['email']['password'] == '' and 'vapid' not in cf
 assert cf['secrets_set'] == {'serverchan': True, 'pushplus': True,
-                            'email_password': True, 'vapid': True}
+                            'email_password': True, 'vapid': True,
+                            'wecom': True}
 assert cf['email']['username'] == 'a@b.c', '非机密字段要照常返回'
 merged = {'serverchan_sendkey': 'SCTxxx', 'pushplus_token': 'tok', 'email': {'password': 'authcode'}}
 app_mod._merge_secret(merged, {'serverchan_sendkey': ''}, 'serverchan_sendkey')
