@@ -52,6 +52,19 @@ fi
 log "4/8 初始化 PostgreSQL"
 systemctl enable --now postgresql
 
+# 2G 小机加 2G swap：pip 装 cryptography / 编译 psycopg2 时容易顶到 OOM
+if ! swapon --show | grep -q .; then
+    if [ ! -f /swapfile ]; then
+        fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+        chmod 600 /swapfile
+        mkswap /swapfile >/dev/null
+    fi
+    swapon /swapfile
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    sysctl -qw vm.swappiness=10
+    echo "已启用 2G swap"
+fi
+
 DB_PASS_FILE=/root/.fund_monitor_db_pass
 if [ -f "$DB_PASS_FILE" ]; then
     DB_PASS=$(cat "$DB_PASS_FILE")
@@ -144,7 +157,11 @@ else
     echo "未提供公网 IP，仅开 8443 HTTP。拿到 IP 后重跑：sudo bash deploy/setup.sh <公网IP>"
 fi
 
-caddy validate --config /etc/caddy/Caddyfile >/dev/null
+caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+    || { caddy adapt --config /etc/caddy/Caddyfile >/dev/null || die "Caddyfile 语法不通过"; }
+# caddy validate 以 root 身份会顺手把 log 文件建成 root:root 0600，
+# 之后服务以 caddy 用户跑就会 permission denied，必须把属主改回来
+chown -R caddy:caddy /var/log/caddy
 systemctl enable --now caddy
 systemctl restart caddy
 

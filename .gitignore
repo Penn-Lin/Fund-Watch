@@ -12,8 +12,8 @@ fund-deploy.tar.gz
 .chrome-err.log
 .cdp_*.py
 .webpush_repro.py
-ui_shot*.png
-ui_ix*.png
+ui_*.png
+.codebuddy/
 _probe*
 _git_stat.txt
 _cleanup_check.txt

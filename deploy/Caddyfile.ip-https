@@ -11,9 +11,21 @@
 # 证书 6 天有效，Caddy 每 2 天自动续。别删 /var/lib/caddy，
 # 那里面是证书和 ACME 账号状态，删了要重申请，会撞 LE 限速。
 
+# 关键：客户端用 IP 直连时浏览器/curl 都不发 SNI（RFC 6066 不允许 IP 字面量），
+# Caddy 收不到 SNI 就没法挑证书，握手直接失败（SEC_E_ILLEGAL_MESSAGE）。
+# 用 default_sni 兜底，让无 SNI 的连接也能拿到这张 IP 证书。
+{
+	default_sni __PUBLIC_IP__
+}
+
 __PUBLIC_IP__ {
+	# IP 证书必须走 ACME 的短周期 profile（LE 对 IP 只签 6 天证书）。
+	# 注意：Caddy 2.11 的写法是 issuer acme { profile ... }，
+	# 不是 tls { profile ... }（后者会报 unknown subdirective）。
 	tls {
-		profile shortlived
+		issuer acme {
+			profile shortlived
+		}
 	}
 	encode gzip zstd
 	reverse_proxy 127.0.0.1:8000 {
