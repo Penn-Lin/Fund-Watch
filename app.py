@@ -1601,10 +1601,58 @@ def _handle_db_unavailable(e):
     return 'Internal Server Error', 500
 
 
+@app.route('/api/global_probe')
+def api_global_probe():
+    """全球指数数据源探测：在 Render 的真实网络环境下逐个测候选源
+
+    为什么必须先测：本机能访问的源（如东财 push2）从 Render 可能 502，
+    反之亦然的也有。做"全球市场"之前先把可达性钉死，避免设计建立在猜测上。
+    """
+    import time as _t
+    out = []
+    tests = [
+        ('yahoo-query1',
+         'https://query1.finance.yahoo.com/v8/finance/chart/%5EN225?interval=1d&range=1d',
+         {'User-Agent': 'Mozilla/5.0'}),
+        ('yahoo-query2',
+         'https://query2.finance.yahoo.com/v8/finance/chart/%5EGDAXI?interval=1d&range=1d',
+         {'User-Agent': 'Mozilla/5.0'}),
+        ('sina-int',
+         'https://hq.sinajs.cn/list=int_nikkei,int_dax30,int_sp500,int_ftse',
+         {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn'}),
+        ('em-push2',
+         'https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f2,f3,f12,f14'
+         '&secids=100.N225,100.GDAXI,100.KS11,100.TWII',
+         {'User-Agent': 'Mozilla/5.0'}),
+        ('tencent',
+         'https://qt.gtimg.cn/q=hkHSI,ukUKX',
+         {'User-Agent': 'Mozilla/5.0'}),
+    ]
+    for name, url, headers in tests:
+        t0 = _t.time()
+        try:
+            resp = fund_data._http_get(url, headers=headers, timeout=8)
+            ms = int((_t.time() - t0) * 1000)
+            if resp is None:
+                out.append({'name': name, 'ok': False, 'ms': ms,
+                            'error': '请求失败（超时或熔断）'})
+                continue
+            out.append({
+                'name': name, 'ok': resp.status_code == 200, 'ms': ms,
+                'status': resp.status_code,
+                'sample': (resp.text or '')[:260].replace('\n', ' '),
+            })
+        except Exception as e:
+            out.append({'name': name, 'ok': False,
+                        'ms': int((_t.time() - t0) * 1000),
+                        'error': '%s: %s' % (type(e).__name__, str(e)[:120])})
+    return jsonify({'sources': out, 'at': rule_engine.now_str()})
+
+
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.34', 'commit': 'db-degrade-on-network-fail'})
+    return jsonify({'version': '3.35', 'commit': 'global-index-probe'})
 
 
 @app.route('/api/threads')
