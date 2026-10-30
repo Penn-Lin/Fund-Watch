@@ -4,6 +4,7 @@ __pycache__/
 data/
 config.json
 .workbuddy/
+fund-deploy.tar.gz
 
 # 测试临时文件（CDP 诊断用，勿提交）
 .chrome-*/

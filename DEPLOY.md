@@ -11,11 +11,14 @@ ssh-keygen -t ed25519 -f "$HOME\.ssh\id_fund_aliyun"   # 已有则跳过
 # 把 $HOME\.ssh\id_fund_aliyun.pub 内容加到服务器 root 的 ~/.ssh/authorized_keys
 # （阿里云控制台 → 远程连接/Workbench 里粘贴，或实例创建时选密钥对）
 
-# 1) 上传代码（排除本地虚拟环境与数据）
+# 1) 上传代码：用 git archive 打包，自动排除 venv / data / 诊断脚本
+#    （不要用 scp -r .\*，会把 Windows 的 venv 传上去，几百 MB 且不能用）
 $IP = "<公网IP>"
-scp -i "$HOME\.ssh\id_fund_aliyun" -r .\* root@${IP}:/opt/fund-monitor/
+git archive --format=tar.gz -o fund-deploy.tar.gz HEAD
+scp fund-deploy.tar.gz root@${IP}:/tmp/
+ssh root@${IP} "mkdir -p /opt/fund-monitor && tar xzf /tmp/fund-deploy.tar.gz -C /opt/fund-monitor"
 # 或用 rsync（若本机装了 Git Bash / WSL）
-rsync -avz -e "ssh -i $HOME/.ssh/id_fund_aliyun" --exclude venv --exclude data --exclude .git ./ root@${IP}:/opt/fund-monitor/
+rsync -avz --exclude venv --exclude data --exclude .git ./ root@${IP}:/opt/fund-monitor/
 
 # 2) 初始化（装包、建库、venv、systemd、Caddy HTTPS）
 ssh -i "$HOME\.ssh\id_fund_aliyun" root@${IP} "bash /opt/fund-monitor/deploy/setup.sh ${IP}"
