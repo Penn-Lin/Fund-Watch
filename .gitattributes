@@ -1,0 +1,6 @@
+# 部署脚本要在 Linux 上执行，必须是 LF。
+# 不加这条时，Windows 下 core.autocrlf=true 会把 checkout/archive 出来的
+# 脚本转成 CRLF，到服务器上执行会报 $'\r': command not found。
+*.sh        text eol=lf
+*.service   text eol=lf
+deploy/*    text eol=lf
