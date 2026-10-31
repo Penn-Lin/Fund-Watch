@@ -1072,10 +1072,16 @@ def fetch_yahoo_history(proxy_url, code, range_='1y'):
         return hit.get('rows') or [], '历史数据解析失败'
     rows = []
     for r in (j.get('rows') or []):
-        if not isinstance(r, (list, tuple)) or len(r) < 5:
+        if not isinstance(r, (list, tuple)) or len(r) < 2:
             continue
-        rows.append({'date': r[0], 'open': r[1], 'high': r[2],
-                     'low': r[3], 'close': r[4]})
+        if len(r) >= 5:
+            rows.append({'date': r[0], 'open': r[1], 'high': r[2],
+                         'low': r[3], 'close': r[4]})
+        else:
+            # 兼容只回 [date, close] 的旧版代理：前端画的是收盘价折线，
+            # 只用 close；缺 OHL 就填同值，不影响渲染也只影响"振幅"这类派生值
+            rows.append({'date': r[0], 'open': r[1], 'high': r[1],
+                         'low': r[1], 'close': r[1]})
     if rows:
         _yahoo_hist_cache[code] = {'rows': rows, 'ts': time.time()}
     return rows or (hit.get('rows') or []), (None if rows else '行情源无数据')
