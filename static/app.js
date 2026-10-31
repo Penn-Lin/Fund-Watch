@@ -194,8 +194,23 @@ function fmtQuoteTime(raw) {
     ' ' + d.slice(8, 10) + ':' + d.slice(10, 12);
 }
 
-/** 成交额（元）→ 亿 / 万亿 */
-function fmtAmount(v) {
+/**
+ * 详情页的行情时间标签
+ *
+ * 外围市场（yh_）只给"交易日 + 收盘"：Yahoo 的 regularMarketTime 是它自己的
+ * 数据更新时间，实测韩国给的是首尔 20:05（实际 15:30 就收盘了），
+ * 拿它当行情时间会误导。美股时间戳是美东，标注（美东）。
+ */
+function ixTimeLabel(ix) {
+  const secid = ix.secid || '';
+  if (secid.indexOf('yh_') === 0) {
+    return (ix.quote_date || '') + ' 收盘';
+  }
+  const t = fmtQuoteTime(ix.quote_time);
+  return (t ? t + ' 行情' : '行情') + (ixMarket(ix) === 'us' ? '（美东）' : '');
+}
+
+/** 成交额（元）→ 亿 / 万亿 */function fmtAmount(v) {
   if (v === null || v === undefined || !isFinite(v) || v <= 0) return '—';
   if (v >= 1e12) return (v / 1e12).toFixed(2) + ' 万亿';
   if (v >= 1e8) return (v / 1e8).toFixed(2) + ' 亿';
@@ -236,7 +251,7 @@ function ixHeroHTML(ix) {
     <div class="ixs-hero-l">
       <div class="ixs-name">${esc(ix.name)}<span class="ixs-secid">${esc(ix.secid)}</span></div>
       <div class="ixs-price">${num(ix.price)}</div>
-      <div class="ixs-time">${esc(fmtQuoteTime(ix.quote_time))} 行情${ixMarket(ix) === 'us' ? '（美东）' : ''}</div>
+      <div class="ixs-time">${esc(ixTimeLabel(ix))}</div>
     </div>
     <div class="ixs-hero-r">
       <div class="ixs-big ${c}">${pct(ix.change_pct)}</div>
