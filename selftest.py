@@ -186,16 +186,25 @@ assert '板块' not in msg2 and msg2.count('\n') == len(ROWS) + 1, msg2
 # 7b. 聚合指数提醒（阈值 1% 时各指数穿越时点分散，逐个推就是十来分钟响一次）
 ixa = app_mod._index_alert_cfg({})
 assert ixa['interval_min'] == 15 and ixa['threshold'] == 3.0, ixa
+assert ixa['step'] == 0.5 and ixa['max_per_day'] == 20, ixa
 assert app_mod._index_alert_cfg({'index_alert': {'threshold': 1}})['threshold'] == 1.0
-assert app_mod._index_alert_cfg({'index_alert': {'interval_min': 1}})['interval_min'] == 5, '间隔下限 5 分钟'
+assert app_mod._index_alert_cfg({'index_alert': {'interval_min': 1}})['interval_min'] == 1, '间隔下限 1 分钟'
 assert app_mod._index_alert_cfg({'index_alert': {'threshold': 'x'}})['threshold'] == 3.0, '脏阈值回退'
+# 分级：起点 1%、步长 0.5% → 档位 1/2/3…
+_ia1 = app_mod._index_alert_cfg({'index_alert': {'threshold': 1, 'step': 0.5}})
+assert app_mod._ix_level(-1.0, 1.0, 0.5) == 1, '-1.00% 是第 1 档'
+assert app_mod._ix_level(-1.49, 1.0, 0.5) == 1, '-1.49% 仍第 1 档'
+assert app_mod._ix_level(-1.5, 1.0, 0.5) == 2, '-1.50% 进第 2 档'
+assert app_mod._ix_level(-2.2, 1.0, 0.5) == 3, '-2.20% 第 3 档'
+assert app_mod._ix_level(3.0, 1.0, 0.5) == 5, '+3.00% 第 5 档（涨跌对称）'
 BATCH = app_mod._build_index_batch_message(
     '10:31', [{'name': '科创50', 'change_pct': -3.66, 'price': 1474.04},
               {'name': '创业板指', 'change_pct': -1.24, 'price': 3068.62}], 1.0)
 bl = BATCH.split('\n')
 assert bl[0] == '⚡ 指数提醒 10:31', bl[0]
 assert all(l.startswith('· ') and '%，' in l for l in bl[1:-1]), BATCH
-assert not bl[-1].startswith('·') and '共 2 个指数超 ±1.00%' == bl[-1], bl[-1]
+assert not bl[-1].startswith('·') and '共 2 个指数超 ±1.00%' in bl[-1], bl[-1]
+assert '最深 科创50 -3.66%' in bl[-1], bl[-1]
 
 # 7c. 美股汇总的两道闸门
 # ① 这场得收完盘（美东 09:30-16:00 之间 = 还在交易，不能推"昨夜收盘"）

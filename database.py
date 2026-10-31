@@ -30,9 +30,13 @@ except ImportError:
     _PSYCOPG2_OK = False
 
 DEFAULT_CONFIG = {
-    'scan_interval_seconds': 60,
-    'off_hours_interval_seconds': 600,
-    'index_alert': {'enabled': False, 'threshold': 3, 'interval_min': 15},
+    'scan_interval_seconds': 180,        # 盘中：3 分钟一轮
+    'off_hours_interval_seconds': 600,   # 盘后：10 分钟一轮
+    'nav_interval_seconds': 300,         # 净值公布时段（19:30-23:30）：5 分钟一轮
+    # 指数提醒：起点 1%，之后每跌/涨 0.5% 再提醒一档（越走越深 → 提醒越密），
+    # 档位去重保证每一档每天只推一次；3 分钟聚合窗口让同窗口的多档合成一条。
+    'index_alert': {'enabled': False, 'threshold': 1, 'step': 0.5,
+                    'interval_min': 3, 'max_per_day': 20},
     'us_index_summary': {'enabled': False, 'time': '08:00'},
 }
 
@@ -408,6 +412,16 @@ def intraday_sent(stat_date, kind, slot):
         'WHERE stat_date=? AND kind=? AND slot=?', (stat_date, kind, slot)).fetchone()
     conn.close()
     return row['c'] > 0
+
+
+def intraday_count(stat_date, kind):
+    """当天某类型已写了几条 —— 给"每日推送上限"用（极端行情防刷屏）"""
+    conn = get_conn()
+    row = conn.execute(
+        'SELECT COUNT(*) AS c FROM intraday_log '
+        'WHERE stat_date=? AND kind=?', (stat_date, kind)).fetchone()
+    conn.close()
+    return int(row['c'] or 0)
 
 
 def intraday_mark(stat_date, kind, slot, avg_change=None, sent_at=None):

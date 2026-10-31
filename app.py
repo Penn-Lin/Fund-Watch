@@ -187,10 +187,48 @@ def _dispatch_alerts(pending):
 
 
 def _interval():
+    """调度主循环的节拍（秒）
+
+    分成三段，而不是原来的"盘中/盘后"两段：
+      · 盘中：跟着 scan_interval_seconds 走（默认 3 分钟）
+      · 净值公布时段（交易日 19:30-23:30）：nav_interval_seconds（默认 5 分钟）
+        —— 原来这段走的是盘后间隔，若配成 6000 秒，20:00 的收盘汇总能拖到 21:40
+      · 其余：off_hours_interval_seconds（默认 10 分钟）
+    """
     now = rule_engine.now()
-    if rule_engine.is_trading_day(now) and rule_engine.is_market_hours(now):
-        return int(load_config().get('scan_interval_seconds', 60))
+    if not rule_engine.is_trading_day(now):
+        return int(load_config().get('off_hours_interval_seconds', 600))
+    if rule_engine.is_market_hours(now):
+        return int(load_config().get('scan_interval_seconds', 180))
+    hm = now.hour * 100 + now.minute
+    if 1930 <= hm <= 2330:
+        return int(load_config().get('nav_interval_seconds', 300))
     return int(load_config().get('off_hours_interval_seconds', 600))
+
+
+# 各任务最近一次真正执行的时刻（秒级时间戳）—— 让一个主循环承载不同频率的任务
+_task_last = {}
+
+
+def _task_due(name, interval_sec):
+    """频率闸门：距上次执行不足 interval_sec 就跳过，否则记录时间并放行"""
+    now_ts = time.time()
+    last = _task_last.get(name)
+    if last is not None and now_ts - last < interval_sec:
+        return False
+    _task_last[name] = now_ts
+    return True
+
+
+def _in_nav_window(now):
+    """基金净值公布时段：交易日 19:30-23:30（各基金陆续公布当日净值）
+
+    交易日判断放在函数内部，不依赖调用方先判 —— 少一处漏判就少一次白抓。
+    """
+    if not rule_engine.is_trading_day(now):
+        return False
+    hm = now.hour * 100 + now.minute
+    return 1930 <= hm <= 2330
 
 
 # ------------------------- 收盘汇总推送 -------------------------
@@ -483,7 +521,12 @@ def maybe_send_us_index_summary():
 
 
 def _index_alert_cfg(cfg):
-    """指数涨跌提醒配置归一：阈值 + 合并间隔（老配置缺 interval_min 也能跑）"""
+    """指数涨跌提醒配置归一：起点阈值 + 分级步长 + 合并间隔 + 每日上限
+
+    分级（2026-10-31 加）：指数越过起点阈值后，每再走 `step` 个百分点算一档。
+    例：threshold=1、step=0.5 → -1.0% 第 1 档、-1.5% 第 2 档、-2.0% 第 3 档……
+    越跌越深就一档一档地提醒，但每档每天只推一次，所以不会无限刷屏。
+    """
     ia = cfg.get('index_alert') or {}
     try:
         threshold = float(ia.get('threshold') or 3)
@@ -492,12 +535,68 @@ def _index_alert_cfg(cfg):
     if threshold <= 0:
         threshold = 3.0
     try:
+        step = float(ia.get('step') or 0.5)
+    except (TypeError, ValueError):
+        step = 0.5
+    if step <= 0 or step > threshold:
+        step = 0.5            # 步长比起点还大就没意义了，回退默认
+    try:
         interval = int(ia.get('interval_min') or 15)
     except (TypeError, ValueError):
         interval = 15
-    interval = max(5, min(interval, 120))
+    # 下限从 5 放宽到 1：分级提醒需要更密的聚合窗口，否则连续下跌会被攒成一条
+    interval = max(1, min(interval, 120))
+    try:
+        max_per_day = int(ia.get('max_per_day') or 20)
+    except (TypeError, ValueError):
+        max_per_day = 20
+    max_per_day = max(1, min(max_per_day, 100))
     return {'enabled': bool(ia.get('enabled')),
-            'threshold': threshold, 'interval_min': interval}
+            'threshold': threshold, 'step': step,
+            'interval_min': interval, 'max_per_day': max_per_day}
+
+
+def _ix_level(chg, threshold, step):
+    """涨跌幅落在第几档：起点阈值算第 1 档，之后每再走 step 加一档
+
+    threshold=1、step=0.5：-1.00%→1 档、-1.49%→1 档、-1.50%→2 档、-2.20%→3 档
+    不足起点阈值 → 0（不提醒）。涨跌对称。
+    """
+    abs_chg = abs(chg)
+    if abs_chg < threshold:
+        return 0
+    if step <= 0:
+        return 1
+    return int((abs_chg - threshold) / step) + 1
+
+
+def _ix_levels_today(today):
+    """当天各指数各方向已推送到的最高档位 {(secid, direction): level}
+
+    一次性读全表再在内存里取最大值，避免每个指数都查一次库。
+    为什么要"最高档位"而不是"这一档推过没有"：指数可能从 -2.0% 反弹到 -1.6%，
+    如果按精确匹配，反弹后会补推一个早已越过的低档位，用户会觉得莫名其妙。
+    """
+    conn = database.get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT slot FROM intraday_log WHERE stat_date=? AND kind='ixth'",
+            (today,)).fetchall()
+    finally:
+        conn.close()
+    out = {}
+    for r in rows:
+        parts = str(r['slot'] or '').rsplit(':', 2)
+        if len(parts) != 3:
+            continue
+        try:
+            lv = int(parts[2])
+        except ValueError:
+            continue
+        key = (parts[0], parts[1])
+        if lv > out.get(key, 0):
+            out[key] = lv
+    return out
 
 
 def _build_index_batch_message(hm, items, threshold):
@@ -514,7 +613,14 @@ def _build_index_batch_message(hm, items, threshold):
         price = ('%.2f' % it['price']) if it.get('price') else '—'
         lines.append('· %s %s%.2f%%，%s' % (
             it['name'], sign, it['change_pct'], price))
-    lines.append('共 %d 个指数超 ±%.2f%%' % (len(items), threshold))
+    # 末行绝不以 `·` 开头（否则前端会当数据行解析）。
+    # 带上"最深"这一句：分级提醒下用户能立刻判断这是"刚破线"还是"已经跌狠了"。
+    worst = max(items, key=lambda r: abs(r['change_pct']))
+    if abs(worst['change_pct']) >= threshold:
+        lines.append('共 %d 个指数超 ±%.2f%%，最深 %s %+.2f%%' % (
+            len(items), threshold, worst['name'], worst['change_pct']))
+    else:
+        lines.append('共 %d 个指数超 ±%.2f%%' % (len(items), threshold))
     return '\n'.join(lines)
 
 
@@ -574,6 +680,7 @@ def maybe_eval_indices():
         return 0
     today = rule_engine.today_str()
 
+    sent_levels = _ix_levels_today(today)
     fresh = []
     for ix in indices:
         if (ix.get('secid') or '').startswith('us'):
@@ -586,21 +693,27 @@ def maybe_eval_indices():
         chg = ix.get('change_pct')
         if chg is None:
             continue
-        direction = 'up' if chg >= threshold else (
-            'down' if chg <= -threshold else None)
-        if not direction:
+        # 分级档位：起点阈值算第 1 档，之后每再走 step 个百分点加一档
+        # （threshold=1、step=0.5 → -1.0% 第1档 / -1.5% 第2档 / -2.0% 第3档…）
+        level = _ix_level(chg, threshold, ia['step'])
+        if level <= 0:
             continue
+        direction = 'up' if chg > 0 else 'down'
         secid = ix.get('secid') or ix.get('code') or ix['name']
         # 去重键放 intraday_log 而不是 alert_log：用户在前端删掉一条记录
         # 只是为了清理列表，不该顺带把"今天推过"这件事忘掉、下一轮又推一遍。
-        if database.intraday_sent(today, 'ixth', '%s:%s' % (secid, direction)):
+        # 比的是"已推到的最高档位"：反弹回浅档位不再补推，继续走深才算新档。
+        if sent_levels.get((secid, direction), 0) >= level:
             continue
         fresh.append({
             'secid': secid, 'name': ix['name'], 'direction': direction,
-            'change_pct': chg, 'price': ix.get('price'),
+            'change_pct': chg, 'price': ix.get('price'), 'level': level,
         })
 
     if not fresh:
+        return 0
+    # 每日推送条数上限：极端行情（全线跌 5% 以上）下防止一整天响个不停
+    if database.intraday_count(today, 'ixpush') >= ia['max_per_day']:
         return 0
     if not _index_alert_due(today, now, ia['interval_min']):
         return 0   # 还在聚合窗口内：攒着，下一轮和后面的指数一起发
@@ -614,7 +727,7 @@ def maybe_eval_indices():
     ts = rule_engine.now_str()
     for r in fresh:
         database.intraday_mark(today, 'ixth',
-                               '%s:%s' % (r['secid'], r['direction']),
+                               '%s:%s:%d' % (r['secid'], r['direction'], r['level']),
                                r['change_pct'], ts)
     database.intraday_mark(today, 'ixpush', hm, avg, ts)
     conn = database.get_conn()
@@ -791,22 +904,34 @@ _sched_state = {'cycle': 0, 'started_at': None, 'last_cycle_at': None,
 
 def scheduler_loop():
     _sched_state['started_at'] = rule_engine.now_str()
+    last_init = 0.0
     while True:
         cycle_ok = True
         t_cycle = time.time()
-        # 确保表存在（幂等；Neon compute 恢复后自动补建）。
-        # 不能依赖模块级 init_db 成功——它可能因 Neon 冷启动失败。
-        try:
-            database.init_db()
-        except Exception as e:
-            print('init_db error:', e)
-            time.sleep(60)
-            continue
-        try:
-            scan_once()
-        except Exception as e:
-            print('scan error:', e)
-            cycle_ok = False
+        now = rule_engine.now()
+        trading = rule_engine.is_trading_day(now)
+
+        # 建表检查降频到每小时一次。原来每轮都跑 init_db()（一整套 CREATE TABLE
+        # IF NOT EXISTS），等于每隔一个节拍就白连一次库。
+        if time.time() - last_init >= 3600:
+            try:
+                database.init_db()
+                last_init = time.time()
+            except Exception as e:
+                print('init_db error:', e)
+                time.sleep(60)
+                continue
+
+        # ---- 基金扫描：只在交易日净值公布时段 ----
+        # 盘中估值接口全行业下架（estimated_change 恒为 None），当日净值要晚上才公布，
+        # 所以白天抓基金拿到的仍是上一交易日的净值 —— 纯浪费请求，还容易触发东财风控。
+        if trading and _in_nav_window(now):
+            try:
+                scan_once()
+            except Exception as e:
+                print('scan error:', e)
+                cycle_ok = False
+
         try:
             maybe_send_summary()
         except Exception as e:
@@ -820,11 +945,14 @@ def scheduler_loop():
         except Exception as e:
             print('intraday brief error:', e)
             cycle_ok = False
-        try:
-            maybe_eval_indices()
-        except Exception as e:
-            print('index alert error:', e)
-            cycle_ok = False
+        # ---- 指数阈值：只在交易日盘中评估 ----
+        # 收盘后行情不再变化，再评估只是拿收盘价重算一遍（17:00 的收盘汇总已覆盖）。
+        if trading and rule_engine.is_market_hours(now):
+            try:
+                maybe_eval_indices()
+            except Exception as e:
+                print('index alert error:', e)
+                cycle_ok = False
         try:
             maybe_send_index_summary()
         except Exception as e:
@@ -838,7 +966,7 @@ def scheduler_loop():
         _sched_state['cycle'] += 1
         _sched_state['last_cycle_at'] = rule_engine.now_str()
         _sched_state['last_cycle_ms'] = int((time.time() - t_cycle) * 1000)
-        # 失败时快速重试（Neon 冷启动/网络抖动后能自愈），成功时按配置间隔
+        # 失败时快速重试（网络抖动后能自愈），成功时按配置间隔
         try:
             time.sleep(60 if not cycle_ok else _interval())
         except Exception:
