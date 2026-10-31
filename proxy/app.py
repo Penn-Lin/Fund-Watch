@@ -21,9 +21,11 @@ Start: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4
 """
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 
 import requests
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 
 # 36 个市场（新浪 znb_ 前缀）。台湾是 TWJQ 不是 TWII，代码写错接口返回空。
 CODES = [
@@ -146,6 +148,98 @@ def sina_global():
 def health():
     return jsonify({'ok': True, 'cached': len(_cache['rows']),
                     'age_sec': int(time.time() - _cache['ts']) if _cache['ts'] else None})
+
+
+# ==================== Yahoo Finance 转发 ====================
+#
+# 为什么用 Yahoo 而不是只靠新浪：
+#   · Yahoo 的 chart API 同时给「最新价 + 昨收 + marketState + 历史 K 线」，
+#     有历史就能画走势图（新浪只有快照，详情页永远是"暂无走势数据"）
+#   · 覆盖更全（欧洲各国、印度、加拿大…），字段也更规范
+# 谁在调：阿里云机房访问 Yahoo 会被按 IP 拦成中文 403 页，所以只能从这里中转。
+# 设计：本服务**只做裸转发**，解析和业务计算全在阿里云侧 ——
+#   这样解析逻辑只有一份，不会出现"两处解析不同步"（high/low 就这么漏过一次）。
+YAHOO_BASE = 'https://query1.finance.yahoo.com'
+YAHOO_HEADERS = {
+    'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                   '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'),
+    'Accept': 'application/json,text/plain,*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+}
+# 白名单：symbol 会拼进第三方 URL，不能透传任意值
+YAHOO_ALLOWED = frozenset([
+    '^N225', '^KS11', '^TWII', '^AXJO', '^BSESN', '^NSEI', '^STI',
+    '^FTSE', '^GDAXI', '^FCHI', '^STOXX50E', '^FTSEMIB', '^IBEX', '^AEX', '^SSMI',
+    '^GSPC', '^IXIC', '^DJI', '^GSPTSE', '^BVSP', '^MXX', '^MERV',
+    '^HSI', '^HSCE',
+])
+YAHOO_RANGES = frozenset(['1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', 'max'])
+YAHOO_INTERVALS = frozenset(['1m', '5m', '15m', '30m', '60m', '1d', '1wk'])
+
+
+def _yahoo_chart(symbol, rng='1d', itv='1d'):
+    """取单个 symbol 的 chart 结果（返回 result[0]，失败 None）"""
+    url = '%s/v8/finance/chart/%s?interval=%s&range=%s' % (
+        YAHOO_BASE, quote(symbol, safe=''), itv, rng)
+    try:
+        r = requests.get(url, headers=YAHOO_HEADERS, timeout=12)
+        j = r.json()
+        res = (j.get('chart') or {}).get('result') or []
+        return res[0] if res else None
+    except Exception:
+        return None
+
+
+@app.route('/api/yahoo_batch')
+def yahoo_batch():
+    """批量取最新行情：返回 {symbol: meta}（只给 meta，不含 K 线数组，省流量）"""
+    raw = (request.args.get('symbols') or '').strip()
+    syms = [s for s in raw.split(',') if s]
+    if not syms or len(syms) > 24 or any(s not in YAHOO_ALLOWED for s in syms):
+        return jsonify({'error': 'bad symbols'}), 400
+    out = {}
+
+    def one(sym):
+        r0 = _yahoo_chart(sym, '1d', '1d')
+        if r0 and r0.get('meta'):
+            out[sym] = r0['meta']
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(one, syms))
+    if not out:
+        return jsonify({'error': 'yahoo unavailable', 'data': {}}), 502
+    return jsonify(out)
+
+
+@app.route('/api/yahoo_history')
+def yahoo_history():
+    """历史 K 线（给走势图用）：返回 {symbol, range, interval, prev_close, rows:[[date, close]]}"""
+    sym = request.args.get('symbol', '')
+    rng = request.args.get('range', '1y')
+    itv = request.args.get('interval', '1d')
+    if sym not in YAHOO_ALLOWED:
+        return jsonify({'error': 'symbol not allowed'}), 400
+    if rng not in YAHOO_RANGES or itv not in YAHOO_INTERVALS:
+        return jsonify({'error': 'bad params'}), 400
+    r0 = _yahoo_chart(sym, rng, itv)
+    if not r0:
+        return jsonify({'error': 'yahoo unavailable', 'rows': []}), 502
+    meta = r0.get('meta') or {}
+    ts = r0.get('timestamp') or []
+    q = ((r0.get('indicators') or {}).get('quote') or [{}])[0]
+    closes = q.get('close') or []
+    rows = []
+    for i, t in enumerate(ts):
+        c = closes[i] if i < len(closes) else None
+        if c is None:
+            continue
+        rows.append([time.strftime('%Y-%m-%d', time.gmtime(t + 8 * 3600)), round(float(c), 4)])
+    return jsonify({
+        'symbol': sym, 'range': rng, 'interval': itv,
+        'prev_close': meta.get('chartPreviousClose') or meta.get('previousClose'),
+        'market_state': meta.get('marketState'),
+        'rows': rows,
+    })
 
 
 if __name__ == '__main__':
