@@ -760,3 +760,164 @@ def probe_index(secid, days=30):
         'kline_error': kl_err,
         'minute_date': mdate, 'minute_count': len(mrows), 'minute_error': m_err,
     }
+
+
+# ==================== 新浪全球指数（znb_ 前缀） ====================
+#
+# 覆盖 36 个市场，一次请求全部返回 —— 国内机房唯一能拿到的韩国/台湾数据。
+# ⚠️ 台湾是 TWJQ（不是 TWII），韩国是 KOSPI；代码写错接口返回空，这个坑踩过。
+# ⚠️ 新浪对机房/IDC IP 返回 403（家用宽带正常）→ 线上必须经 Render 转发。
+#
+# 字段（实测；不同市场字段数不一致，必须防御性解析）：
+#   [0]名称 [1]点位 [2]涨跌额 [3]涨跌幅% [4]时间(格式混乱) [5]时间戳 [6]日期
+#   [7]时间 [8]开盘 [9]昨收 [10]最高 [11]最低
+#   恒生/部分市场只有 6 个字段（没有日期）→ 日期用同批次其它市场补齐。
+SINA_GLOBAL_LIST = [
+    ('NKY', '日经225', 'apac'),
+    ('KOSPI', '韩国KOSPI', 'apac'),
+    ('TWJQ', '台湾加权', 'apac'),
+    ('AS51', '澳洲标普200', 'apac'),
+    ('SENSEX', '印度SENSEX', 'apac'),
+    ('FSSTI', '新加坡海峡', 'apac'),
+    ('JCI', '印尼雅加达', 'apac'),
+    ('SET', '泰国SET', 'apac'),
+    ('PCOMP', '菲律宾综合', 'apac'),
+    ('VNINDEX', '越南胡志明', 'apac'),
+    ('NZSE50FG', '新西兰50', 'apac'),
+    ('FBMKLCI', '吉隆坡综合', 'apac'),
+    ('UKX', '英国富时100', 'eu'),
+    ('DAX', '德国DAX', 'eu'),
+    ('CAC', '法国CAC40', 'eu'),
+    ('SX5E', '欧洲斯托克50', 'eu'),
+    ('AEX', '荷兰AEX', 'eu'),
+    ('SMI', '瑞士市场', 'eu'),
+    ('IBEX', '西班牙IBEX35', 'eu'),
+    ('FTSEMIB', '意大利富时MIB', 'eu'),
+    ('OMX', '瑞典OMX30', 'eu'),
+    ('OSEAX', '挪威OSE', 'eu'),
+    ('HEX', '芬兰赫尔辛基', 'eu'),
+    ('ISEQ', '爱尔兰综合', 'eu'),
+    ('INDEXCF', '俄罗斯MOEX', 'eu'),
+    ('XU100', '土耳其BIST100', 'eu'),
+    ('MADX', '马德里综合', 'eu'),
+    ('SPTSX', '加拿大TSX', 'am'),
+    ('IBOV', '巴西IBOVESPA', 'am'),
+    ('MEXBOL', '墨西哥BOLSA', 'am'),
+    ('MERVAL', '阿根廷MERVAL', 'am'),
+    ('JALSH', '南非综合', 'me'),
+    ('CASE', '埃及EGX', 'me'),
+    ('SASEIDX', '沙特TADAWUL', 'me'),
+    ('KSE100', '巴基斯坦卡拉奇', 'me'),
+    ('CSEALL', '斯里兰卡科伦坡', 'me'),
+]
+
+SINA_GLOBAL_URL = 'https://hq.sinajs.cn/list='
+SINA_HEADERS = {'User-Agent': 'Mozilla/5.0',
+                'Referer': 'https://finance.sina.com.cn'}
+
+_sina_global_cache = {'ts': 0.0, 'data': []}
+_render_cache = {}
+
+
+def _sina_date_ok(v):
+    """新浪的日期字段格式混乱（'2026-10-30' / '9/26/2025' / 空），只认 ISO 那种"""
+    return bool(v) and len(v) == 10 and v[4:5] == '-' and v[:4].isdigit()
+
+
+def parse_sina_global(text):
+    """解析新浪 znb_ 应答
+
+    返回 [{code,name,price,change,change_pct,quote_date,quote_time,open,prev_close,market}]
+    """
+    rows = []
+    for line in (text or '').split(';'):
+        line = line.strip()
+        if '="' not in line:
+            continue
+        code = line.split('=')[0].replace('var hq_str_znb_', '').strip()
+        raw = line.split('="', 1)[1].rstrip('";')
+        p = raw.split(',')
+        if len(p) < 4 or not p[1]:
+            continue
+        try:
+            price = float(p[1])
+            chg = float(p[2]) if p[2] else None
+            pct = float(p[3]) if p[3] else None
+        except (TypeError, ValueError):
+            continue
+        rows.append({
+            'code': code,
+            'name': p[0],
+            'price': price,
+            'change': chg,
+            'change_pct': pct,
+            'quote_date': p[6] if len(p) > 6 and _sina_date_ok(p[6]) else '',
+            'quote_time': p[7] if len(p) > 7 else (p[4] if len(p) > 4 else ''),
+            'open': _f(p[8]) if len(p) > 8 else None,
+            'prev_close': _f(p[9]) if len(p) > 9 else None,
+        })
+    # 没有日期的市场（恒生等）用同批次里最新的日期补齐，
+    # 否则新鲜度判断会把它们全当"过期行情"丢掉
+    dates = [r['quote_date'] for r in rows if r['quote_date']]
+    if dates:
+        best = max(dates)
+        for r in rows:
+            if not r['quote_date']:
+                r['quote_date'] = best
+    name_by_code = {c: n for c, n, _ in SINA_GLOBAL_LIST}
+    market_by_code = {c: m for c, _, m in SINA_GLOBAL_LIST}
+    for r in rows:
+        r['name'] = name_by_code.get(r['code']) or r['name']
+        r['market'] = market_by_code.get(r['code'], 'other')
+    return rows
+
+
+def fetch_sina_global(max_age=30.0, force=False):
+    """直连新浪抓全球指数（36 个市场）
+
+    ⚠️ 只有"能访问新浪"的环境才有效（家用宽带 / Render）；
+    阿里云机房 IP 会被 403，那边要改用 fetch_global_via_render()。
+    """
+    if not force and _sina_global_cache['data'] and \
+            time.time() - _sina_global_cache['ts'] < max_age:
+        return _sina_global_cache['data']
+    codes = ','.join('znb_' + c for c, _, _ in SINA_GLOBAL_LIST)
+    resp = _http_get(SINA_GLOBAL_URL + codes, headers=SINA_HEADERS, timeout=10)
+    if resp is None:
+        return _sina_global_cache['data']        # 降级：上次缓存
+    try:
+        resp.encoding = 'gbk'
+        rows = parse_sina_global(resp.text)
+    except Exception:
+        return _sina_global_cache['data']
+    if rows:
+        _sina_global_cache['data'] = rows
+        _sina_global_cache['ts'] = time.time()
+    return rows
+
+
+def fetch_global_via_render(proxy_url, max_age=180.0):
+    """经 Render 转发取全球指数（阿里云机房 IP 被新浪 403 的绕行方案）
+
+    proxy_url 形如 https://fund-watch.onrender.com
+    Render 免费实例会休眠，冷启动 30~60 秒 → 硬超时放宽到 90 秒。
+    只在交易时段调用几十次/天，对实例小时几乎无影响。
+    """
+    if not proxy_url:
+        return fetch_sina_global(max_age=max_age)
+    c = _render_cache.setdefault('global', {'ts': 0.0, 'data': []})
+    now = time.time()
+    if c['data'] and now - c['ts'] < max_age:
+        return c['data']
+    resp = _http_get(proxy_url.rstrip('/') + '/api/sina_global',
+                     timeout=30, hard_timeout=90)
+    if resp is None:
+        return c['data']                          # 降级：上次缓存
+    try:
+        rows = resp.json()
+    except Exception:
+        return c['data']
+    if isinstance(rows, list) and rows:
+        c['data'] = rows
+        c['ts'] = now
+    return rows

@@ -1377,6 +1377,37 @@ def api_sector_heat():
         return jsonify([])
 
 
+@app.route('/api/sina_global')
+def api_sina_global():
+    """全球指数快照（新浪 znb_，36 个市场）—— Render 专用转发点
+
+    背景：阿里云的机房 IP 被新浪 `hq.sinajs.cn` 全线 403（同上证都拿不到），
+    而家用宽带/海外节点正常。所以让 Render 取数、阿里云再来这里拿。
+
+    安全：**不接受任何查询参数**，只能取固定那批代码（SINA_GLOBAL_LIST），
+    避免这个路由被当成通用 HTTP 代理滥用。
+    """
+    try:
+        return jsonify(fund_data.fetch_sina_global())
+    except Exception:
+        return jsonify([])
+
+
+@app.route('/api/global_indices')
+def api_global_indices():
+    """全球市场指数（对外接口，前端用）
+
+    链路：新浪 znb_ → Render 转发 → 本机缓存后下发。
+    没配 RENDER_PROXY_URL 时退回直连（家用宽带/开发环境可用）。
+    """
+    try:
+        rows = fund_data.fetch_global_via_render(
+            os.environ.get('RENDER_PROXY_URL', ''))
+        return jsonify(rows)
+    except Exception:
+        return jsonify([])
+
+
 @app.route('/api/us_sector_heat')
 def api_us_sector_heat():
     """美股行业板块快照（SPDR 11 行业 ETF，10 分钟缓存；收盘后数据天然冻结）"""
@@ -1780,7 +1811,7 @@ def api_global_probe():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.36', 'commit': 'tiered-index-alert'})
+    return jsonify({'version': '3.37', 'commit': 'global-via-render'})
 
 
 @app.route('/api/threads')
