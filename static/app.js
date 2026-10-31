@@ -72,10 +72,18 @@ async function loadSummary() {
 
 /* ---------------- 指数行情 ---------------- */
 let _indices = [];
+let _ixGroups = [];   // 后端下发的展示分组 [{key,label,secids}]
 
 async function loadIndices() {
   try {
-    _indices = await api('/api/indices');
+    const res = await api('/api/indices');
+    // 新格式 {rows, groups}；兼容旧的纯数组响应（缓存/降级时可能拿到）
+    if (res && Array.isArray(res.rows)) {
+      _indices = res.rows;
+      _ixGroups = Array.isArray(res.groups) ? res.groups : [];
+    } else if (Array.isArray(res)) {
+      _indices = res;
+    }
     renderIndices();
     // 指数详情抽屉若开着，跟着刷新实时数字（不重拉历史图：图只跟 min 级变化）
     if (_ixState && $('#ix-sheet').classList.contains('show')) {
@@ -87,9 +95,10 @@ async function loadIndices() {
 
 /* 市场分区顺序与名称（与后端 fund_data.INDEX_GROUPS 对应） */
 const IX_MARKETS = [
-  { key: 'cn', label: 'A股' },
-  { key: 'hk', label: '港股' },
-  { key: 'us', label: '美股' },
+  { key: 'cn', label: '中国' },
+  { key: 'apac', label: '亚太' },
+  { key: 'eu', label: '欧洲' },
+  { key: 'am', label: '美洲' },
 ];
 
 /** market 字段缺失时按 secid 前缀兜底（旧缓存/降级响应也不能错分组） */
@@ -98,6 +107,7 @@ function ixMarket(ix) {
   const s = ix.secid || '';
   if (s.indexOf('us') === 0) return 'us';
   if (s.indexOf('hk') === 0) return 'hk';
+  if (s.indexOf('znb_') === 0) return 'apac';
   return 'cn';
 }
 
@@ -108,19 +118,33 @@ function ixStatusPill(items) {
   return `<span class="ix-pill ix-pill-${esc(s.key || 'closed')}">${esc(s.label)}</span>`;
 }
 
+/**
+ * 解析出「已就绪的分组」：优先用后端下发的 secids（跨数据源混排也不会错，
+ * 比如美洲组里美股来自腾讯、加拿大来自新浪），没有再退回按 market 过滤。
+ */
+function ixResolvedGroups() {
+  const bySecid = {};
+  _indices.forEach((ix, i) => { bySecid[ix.secid] = { ix, i }; });
+  const src = _ixGroups.length
+    ? _ixGroups
+    : IX_MARKETS.map((m) => ({ key: m.key, label: m.label, secids: [] }));
+  return src.map((g) => ({
+    label: g.label,
+    items: (g.secids && g.secids.length)
+      ? g.secids.map((s) => bySecid[s]).filter(Boolean)
+      : _indices.map((ix, i) => ({ ix, i })).filter((r) => ixMarket(r.ix) === g.key),
+  })).filter((g) => g.items.length);
+}
+
 function renderIndices() {
   const box = $('#index-strip');
   if (!_indices.length) {
     box.innerHTML = '<span class="ix-empty">指数加载中…</span>';
     return;
   }
-  // 按市场分组渲染：段头（市场名 + 状态）→ 网格；段与段之间细线分隔。
+  // 按区域分组渲染：段头（区域名 + 状态）→ 网格；段与段之间细线分隔。
   // 网格用 6 轨道 + span 控制列数（详见 style.css），数据全在一屏内，不再横滑。
-  const groups = IX_MARKETS.map((m) => ({
-    label: m.label,
-    items: _indices.map((ix, i) => ({ ix, i }))
-      .filter((r) => ixMarket(r.ix) === m.key),
-  })).filter((g) => g.items.length);
+  const groups = ixResolvedGroups();
 
   box.innerHTML = groups.map((g, gi) => `
     ${gi ? '<div class="ix-sep"></div>' : ''}
@@ -487,14 +511,21 @@ function ixDetailHTML() {
 }
 
 async function openIxDetail(ix) {
+  const isGlobal = (ix.secid || '').indexOf('znb_') === 0;
   const hit = _ixHistCache[ix.secid];
   const cached = hit && (Date.now() - hit.ts < 60000);
   _ixState = { ix, data: hit ? hit.data : null, mode: 'day' };
+  if (isGlobal) {
+    // 外围市场（新浪 znb_ 源）只提供实时快照，没有历史 K 线接口 →
+    // 直接给降级态，不发那次注定失败的请求
+    _ixState.data = { kline: [], minute: { date: '', rows: [] },
+      errors: { kline: '外围市场暂无走势数据（仅提供实时快照）', minute: '' } };
+  }
   if (_ixState.data) _ixState.mode = pickIxMode(_ixState.data);
   $('#ix-detail').innerHTML = ixDetailHTML();
   $('#ix-mask').classList.add('show');
   $('#ix-sheet').classList.add('show');
-  if (cached) return;   // 60 秒内的缓存直接用，不重复打接口
+  if (cached || isGlobal) return;   // 60 秒内的缓存 / 外围市场：不重复打接口
   try {
     const d = await api('/api/index_history?secid=' + encodeURIComponent(ix.secid) + '&days=300');
     _ixHistCache[ix.secid] = { ts: Date.now(), data: d };

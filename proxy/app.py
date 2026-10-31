@@ -98,6 +98,8 @@ def parse(text):
             'quote_time': p[7] if len(p) > 7 else (p[4] if len(p) > 4 else ''),
             'open': _f(p[8]) if len(p) > 8 else None,
             'prev_close': _f(p[9]) if len(p) > 9 else None,
+            'high': _f(p[10]) if len(p) > 10 else None,
+            'low': _f(p[11]) if len(p) > 11 else None,
         })
     # 没有日期的市场（恒生等）用同批次最新日期补齐，否则会被当过期行情丢掉
     dates = [r['quote_date'] for r in rows if r['quote_date']]

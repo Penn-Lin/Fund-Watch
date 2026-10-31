@@ -189,18 +189,21 @@ def _dispatch_alerts(pending):
 def _interval():
     """调度主循环的节拍（秒）
 
-    分成三段，而不是原来的"盘中/盘后"两段：
-      · 盘中：跟着 scan_interval_seconds 走（默认 3 分钟）
-      · 净值公布时段（交易日 19:30-23:30）：nav_interval_seconds（默认 5 分钟）
-        —— 原来这段走的是盘后间隔，若配成 6000 秒，20:00 的收盘汇总能拖到 21:40
+    四段，而不是原来的"盘中/盘后"两段：
+      · 亚太早盘（08:00-09:30，A股 还没开但日韩台已交易）：5 分钟
+      · A股 盘中：scan_interval_seconds（默认 3 分钟）
+      · 净值公布时段（19:30-23:30）：nav_interval_seconds（默认 5 分钟）
       · 其余：off_hours_interval_seconds（默认 10 分钟）
     """
     now = rule_engine.now()
     if not rule_engine.is_trading_day(now):
         return int(load_config().get('off_hours_interval_seconds', 600))
+    hm = now.hour * 100 + now.minute
+    if 800 <= hm < 930:
+        # 亚太外围已开盘：主节拍必须细到能支撑 5 分钟的抓取
+        return 300
     if rule_engine.is_market_hours(now):
         return int(load_config().get('scan_interval_seconds', 180))
-    hm = now.hour * 100 + now.minute
     if 1930 <= hm <= 2330:
         return int(load_config().get('nav_interval_seconds', 300))
     return int(load_config().get('off_hours_interval_seconds', 600))
@@ -229,6 +232,20 @@ def _in_nav_window(now):
         return False
     hm = now.hour * 100 + now.minute
     return 1930 <= hm <= 2330
+
+
+def _in_apac_window(now):
+    """亚太外围交易时段：北京时间 08:00-14:30
+
+    取日/韩/台/澳/印/新的并集 —— 日本 08:00-14:00、韩国 08:00-14:30、
+    台湾 09:00-13:30、澳洲 07:00-13:00、印度 11:45-18:00、新加坡 09:00-17:00。
+    比 A股 早半小时开盘，所以调度节拍要在 08:00 就切到 5 分钟档。
+    交易日跟 A股 日历走（既有约定：A股休市 = 全系统静默）。
+    """
+    if not rule_engine.is_trading_day(now):
+        return False
+    hm = now.hour * 100 + now.minute
+    return 800 <= hm <= 1430
 
 
 # ------------------------- 收盘汇总推送 -------------------------
@@ -384,11 +401,16 @@ def maybe_send_index_summary():
 
 
 def _us_index_rows():
-    """取出美股指数行（当前只有纳指100）；无则空列表"""
-    indices = fund_data.fetch_indices(max_age=120)
+    """早间汇总用的指数行：美股 3（腾讯）+ 欧洲 3 + 加拿大 1（新浪经代理）
+
+    欧美不参与盘中阈值提醒，只在早上 08:00 这条汇总里出现一次。
+    代理挂了时欧洲/加拿大为空，美股照常（两段各自降级）。
+    """
+    indices = fund_data.fetch_all_indices(
+        os.environ.get('RENDER_PROXY_URL', ''), max_age=300)
     if not indices:
         return []
-    return [ix for ix in indices if (ix.get('secid') or '').startswith('us')]
+    return [ix for ix in indices if (ix.get('market') or '') in ('us', 'eu', 'am')]
 
 
 # 美股常规交易时段（美东 09:30-16:00）换算到北京时间为 21:30-04:00（夏令时）
@@ -433,9 +455,11 @@ def _build_us_index_summary_message():
     rows = _us_index_rows()
     if not rows:
         return None, 0, None
-    # 一条汇总只描述一个美股交易日，用整批里最新的行情日期做标识
-    # （三个指数同日，取 max 防个别指数数据滞后）
-    qds = [r.get('quote_date') for r in rows if r.get('quote_date')]
+    # 一条汇总只描述一个美股交易日，用**美股那几行**里最新的行情日期做标识
+    # （欧洲/加拿大的日期可能差一天，不能参与 max，否则去重键会漂）
+    us_qds = [r.get('quote_date') for r in rows
+              if (r.get('secid') or '').startswith('us') and r.get('quote_date')]
+    qds = us_qds or [r.get('quote_date') for r in rows if r.get('quote_date')]
     if not qds:
         return None, 0, None   # fail-closed：日期取不到就不发，宁可晚一轮
     qd = max(qds)
@@ -456,7 +480,8 @@ def _build_us_index_summary_message():
         weekday = ''
     # 日期用行情自带的美东日期，而不是"北京今天"—— 否则周日早上收到的
     # 是周五的行情却标成周日（2026-09-27 那条就是这么错的）。
-    msg = '🌙 美股收盘 %s %s\n%s' % (qd, weekday, '\n'.join(lines))
+    # 标题用"海外市场"：这条现在除了美股三条，还带欧洲三国和加拿大。
+    msg = '🌙 海外市场收盘 %s %s\n%s' % (qd, weekday, '\n'.join(lines))
     return msg, len(lines), qd
 
 
@@ -648,8 +673,13 @@ def _index_alert_due(today, now, interval_min):
     return (now - last).total_seconds() >= interval_min * 60
 
 
-def maybe_eval_indices():
-    """指数涨跌幅超阈值 → **按时间窗聚合后**推送（每指数每方向每日一次）
+def maybe_eval_indices(markets=None):
+    """指数涨跌幅超阈值 → **按时间窗聚合后**推送（分级 + 每档每日一次）
+
+    `markets`: 只评估这些市场（None = 除美股外的全部）。
+      · 中国/港股由 A股 盘中节拍驱动（3 分钟）
+      · 亚太外围由自己的时段驱动（5 分钟，08:00-14:30）
+      · 欧洲/加拿大**不参与盘中提醒**，只进 08:00 的早间汇总
 
     必须只在「当日行情」上判定，否则会出两个 bug（2026-09-14 修）：
     ① 收盘后/周末/节假日，接口返回的是上一个交易日的收盘值，change_pct 还是旧值；
@@ -658,9 +688,7 @@ def maybe_eval_indices():
     ② 更严重的是去重被这一次误触发占掉，当天真正跌破阈值时**不会再提醒**。
 
     2026-10-08 改：从"每个指数一条"改为"一轮一条"。
-    阈值 1% 时各指数穿越时点分散，逐个推就是十来分钟响一次
-    （10-08 一天推了 6 条：恒生科技/创业板指/深证成指/沪深300/上证指数/恒生指数）。
-    现在把窗口内新穿越的指数合并成一条，间隔由 `index_alert.interval_min` 控制。
+    2026-10-31 改：加入分级档位（起点 1%、每再走 0.5% 一档）。
     """
     cfg = load_config()
     ia = _index_alert_cfg(cfg)
@@ -675,7 +703,8 @@ def maybe_eval_indices():
     now = rule_engine.now()
     if not rule_engine.is_trading_day(now):
         return 0
-    indices = fund_data.fetch_indices(max_age=60)
+    indices = fund_data.fetch_all_indices(
+        os.environ.get('RENDER_PROXY_URL', ''), max_age=120)
     if not indices:
         return 0
     today = rule_engine.today_str()
@@ -683,8 +712,11 @@ def maybe_eval_indices():
     sent_levels = _ix_levels_today(today)
     fresh = []
     for ix in indices:
-        if (ix.get('secid') or '').startswith('us'):
+        sid = ix.get('secid') or ''
+        if sid.startswith('us'):
             continue  # 美股指数改走早上汇总，不参与盘中实时阈值提醒
+        if markets and (ix.get('market') or 'cn') not in markets:
+            continue
         # 行情日期必须是今天。fail-closed：取不到日期也视为不新鲜——
         # 宁可漏一次，也不要在 0 点把上一交易日的收官数据当今日行情推一遍
         # （那种误触发还会占掉去重名额，让当天真正的下跌提醒发不出来）。
@@ -945,13 +977,21 @@ def scheduler_loop():
         except Exception as e:
             print('intraday brief error:', e)
             cycle_ok = False
-        # ---- 指数阈值：只在交易日盘中评估 ----
-        # 收盘后行情不再变化，再评估只是拿收盘价重算一遍（17:00 的收盘汇总已覆盖）。
-        if trading and rule_engine.is_market_hours(now):
+        # ---- 指数阈值：中国/港股跟 A股 盘中节拍（3 分钟）----
+        # 收盘后行情不再变化，再评估只是拿收盘价重算一遍（17:00 汇总已覆盖）。
+        if trading and rule_engine.is_market_hours(now) and _task_due('ix_cn', 180):
             try:
-                maybe_eval_indices()
+                maybe_eval_indices(markets=('cn', 'hk'))
             except Exception as e:
-                print('index alert error:', e)
+                print('index alert(cn) error:', e)
+                cycle_ok = False
+        # ---- 亚太外围：08:00-14:30 每 5 分钟（韩台日澳印新）----
+        # 独立于 A股 时段：日本韩国比我们早开盘，09:30 才开始评就漏掉早盘了
+        if _in_apac_window(now) and _task_due('ix_apac', 300):
+            try:
+                maybe_eval_indices(markets=('apac',))
+            except Exception as e:
+                print('index alert(apac) error:', e)
                 cycle_ok = False
         try:
             maybe_send_index_summary()
@@ -1316,8 +1356,11 @@ def api_history():
 
 # ------------------------- 概览统计 -------------------------
 
-# 各市场连续竞价时段（含午休，只在"是否进行中"这个粒度上判断，够用）
-_MARKET_SESSION_HOURS = {'cn': (930, 1500), 'hk': (930, 1600)}
+# 各市场连续竞价时段（北京时间，只在"是否进行中"这个粒度上判断，够用）
+# 外围市场取该区域的代表性时段：亚太用日韩（08:00-14:30）、欧洲用英德（15:00-23:30）、
+# 美洲跟美股（21:30-04:00 跨天，单独判断）
+_MARKET_SESSION_HOURS = {'cn': (930, 1500), 'hk': (930, 1600),
+                         'apac': (800, 1430), 'eu': (1500, 2330), 'am': (2130, 400)}
 SESSION_LABELS = {'trading': '交易中', 'closed': '已收盘',
                   'pre': '待开盘', 'holiday': '休市'}
 
@@ -1346,6 +1389,21 @@ def _index_session(ix, now):
         return 'holiday'
     if market == 'hk' and now.weekday() >= 5:
         return 'holiday'
+
+    # 外围市场（亚太/欧洲/加拿大）：各国假期表不维护，统一用
+    # "行情日期是不是今天"做兜底 —— 当天没有新行情就是没开市/已收盘。
+    if market in ('apac', 'eu', 'am'):
+        if now.weekday() >= 5:
+            return 'closed'
+        open_hm, close_hm = _MARKET_SESSION_HOURS[market]
+        if market == 'am':
+            in_session = now_hm >= open_hm or now_hm <= close_hm   # 跨零点
+        else:
+            in_session = open_hm <= now_hm <= close_hm
+        if not in_session:
+            return 'pre' if now_hm < open_hm else 'closed'
+        return 'trading' if qd == today else 'closed'
+
     open_hm, close_hm = _MARKET_SESSION_HOURS.get(market, (930, 1500))
     if now_hm < open_hm:
         return 'pre'
@@ -1354,18 +1412,43 @@ def _index_session(ix, now):
     return 'closed'
 
 
+def _global_cache_age():
+    """外围指数的缓存时长（秒）—— 直接决定 Render 代理被唤醒的频率
+
+    交易时段 2 分钟（前端轮询时数据够新、也支撑 5 分钟的预警节奏）；
+    欧洲/美洲时段 15 分钟（只展示不预警）；其余 1 小时。
+    免费实例 15 分钟无请求即休眠、休眠不消耗实例小时 → 这样夜间/周末几乎零消耗。
+    """
+    now = rule_engine.now()
+    if now.weekday() >= 5:
+        return 3600
+    hm = now.hour * 100 + now.minute
+    if 800 <= hm <= 1430:
+        return 120
+    if 1500 <= hm <= 2330:
+        return 900
+    return 3600
+
+
 @app.route('/api/indices')
 def api_indices():
-    """指数实时行情（60 秒内存缓存，不入库不参与预警）+ 展示用交易状态"""
+    """指数实时行情 + 展示用分组与交易状态
+
+    数据 = 腾讯（中国/港股/美股，本地直连）+ 新浪外围（亚太/欧洲/加拿大，经 Render）。
+    两段各自降级：代理挂了，中国和美股照常显示，只是亚太/欧洲那几个变空。
+    返回 {rows: [...], groups: [{key,label,secids}]}，前端按 groups 顺序渲染。
+    """
+    groups = fund_data.DISPLAY_GROUPS
     try:
-        indices = [dict(ix) for ix in fund_data.fetch_indices()]
+        rows = [dict(ix) for ix in fund_data.fetch_all_indices(
+            os.environ.get('RENDER_PROXY_URL', ''), global_age=_global_cache_age())]
     except Exception:
-        return jsonify([])
+        return jsonify({'rows': [], 'groups': groups})
     now = rule_engine.now()
-    for ix in indices:
+    for ix in rows:
         key = _index_session(ix, now)
         ix['session'] = {'key': key, 'label': SESSION_LABELS[key]}
-    return jsonify(indices)
+    return jsonify({'rows': rows, 'groups': groups})
 
 
 @app.route('/api/sector_heat')
@@ -1811,7 +1894,7 @@ def api_global_probe():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.37', 'commit': 'global-via-render'})
+    return jsonify({'version': '3.38', 'commit': 'global-indices-ui'})
 
 
 @app.route('/api/threads')

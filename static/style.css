@@ -387,17 +387,22 @@ main { padding: 14px 14px 96px; }
 .ix-pill-trading::before { background: #e0932a; }
 .ix-sep { height: 1px; background: var(--border); margin: 10px 0; }
 
-.ix-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.ix-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 8px; }
 .ix-cell {
-  grid-column: span 2; min-width: 0; border: none; background: #f8f9fb;
+  grid-column: span 4; min-width: 0; border: none; background: #f8f9fb;
   border-radius: 10px; padding: 8px 9px; cursor: pointer;
   display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
   transition: transform .15s, background .15s; text-align: left;
 }
 .ix-cell:active { transform: scale(.97); background: #f0f2f5; }
-.ix-grid[data-count="2"] .ix-cell,
+/* 组内自适应铺满：12 轨道的分配让每组都刚好占满整行，不留残边。
+   默认 3 列（span 4）；4 个 → 一行 4 个；2 个 → 一行 2 个；
+   7 个 → 4 + 3 两行；5 个 → 3 + 2 两行。 */
+.ix-grid[data-count="2"] .ix-cell { grid-column: span 6; }
 .ix-grid[data-count="4"] .ix-cell { grid-column: span 3; }
-.ix-grid[data-count="5"] .ix-cell:nth-child(n+4) { grid-column: span 3; }
+.ix-grid[data-count="7"] .ix-cell { grid-column: span 3; }
+.ix-grid[data-count="7"] .ix-cell:nth-child(n+5) { grid-column: span 4; }
+.ix-grid[data-count="5"] .ix-cell:nth-child(n+4) { grid-column: span 6; }
 
 .ix-name {
   font-size: 11px; color: var(--text-2); line-height: 1.2;

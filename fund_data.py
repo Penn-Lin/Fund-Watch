@@ -855,6 +855,8 @@ def parse_sina_global(text):
             'quote_time': p[7] if len(p) > 7 else (p[4] if len(p) > 4 else ''),
             'open': _f(p[8]) if len(p) > 8 else None,
             'prev_close': _f(p[9]) if len(p) > 9 else None,
+            'high': _f(p[10]) if len(p) > 10 else None,
+            'low': _f(p[11]) if len(p) > 11 else None,
         })
     # 没有日期的市场（恒生等）用同批次里最新的日期补齐，
     # 否则新鲜度判断会把它们全当"过期行情"丢掉
@@ -899,8 +901,8 @@ def fetch_sina_global(max_age=30.0, force=False):
 def fetch_global_via_render(proxy_url, max_age=180.0):
     """经 Render 转发取全球指数（阿里云机房 IP 被新浪 403 的绕行方案）
 
-    proxy_url 形如 https://fund-watch.onrender.com
-    Render 免费实例会休眠，冷启动 30~60 秒 → 硬超时放宽到 90 秒。
+    proxy_url 形如 https://fund-watch-getdata.onrender.com
+    Render 免费实例会休眠，冷启动 5~8 秒 → 硬超时放宽到 90 秒。
     只在交易时段调用几十次/天，对实例小时几乎无影响。
     """
     if not proxy_url:
@@ -921,3 +923,94 @@ def fetch_global_via_render(proxy_url, max_age=180.0):
         c['data'] = rows
         c['ts'] = now
     return rows
+
+
+# ---------- 展示用分组（前端按这个渲染，组数固定、组内自适应铺满） ----------
+# 中国/港股/美股走腾讯（本地直连 0.1s）；亚太/欧洲/加拿大走新浪（经 Render）。
+# 美洲组是混源的：美股 3 个来自腾讯、加拿大来自新浪 —— 所以分组按 secid 列，
+# 不按数据源列，前端不用关心数据从哪来。
+DISPLAY_GROUPS = [
+    {'key': 'cn', 'label': '中国', 'secids': [
+        'sh000001', 'sz399001', 'sz399006', 'sh000300', 'sh000688',
+        'hkHSI', 'hkHSTECH',
+    ]},
+    {'key': 'apac', 'label': '亚太', 'secids': [
+        'znb_NKY', 'znb_KOSPI', 'znb_TWJQ',
+        'znb_AS51', 'znb_SENSEX', 'znb_FSSTI',
+    ]},
+    {'key': 'eu', 'label': '欧洲', 'secids': [
+        'znb_UKX', 'znb_DAX', 'znb_CAC',
+    ]},
+    {'key': 'am', 'label': '美洲', 'secids': [
+        'usINX', 'usNDX', 'usDJI', 'znb_SPTSX',
+    ]},
+]
+
+# 参与盘中阈值提醒的外围市场（中国/港股另算；欧美只进早间汇总，不做盘中提醒）
+ALERT_GLOBAL_SECIDS = frozenset([
+    'znb_NKY', 'znb_KOSPI', 'znb_TWJQ',
+    'znb_AS51', 'znb_SENSEX', 'znb_FSSTI',
+])
+
+_GLOBAL_BY_CODE = {c: (n, m) for c, n, m in SINA_GLOBAL_LIST}
+_GLOBAL_SECID_SET = frozenset('znb_' + c for c in _GLOBAL_BY_CODE)
+
+
+def fetch_global_indices(proxy_url='', max_age=180.0):
+    """外围市场指数，返回结构与 fetch_indices 同构（可直接进预警/汇总）
+
+    只保留 DISPLAY_GROUPS 里用到的代码，36 个里其余的不下发。
+    """
+    rows = fetch_global_via_render(proxy_url, max_age=max_age)
+    if not rows:
+        return []
+    by_code = {r.get('code'): r for r in rows}
+    wanted = [s[4:] for g in DISPLAY_GROUPS for s in g['secids']
+              if s.startswith('znb_')]
+    out = []
+    for code in wanted:
+        r = by_code.get(code)
+        if not r or r.get('price') is None:
+            continue
+        meta = _GLOBAL_BY_CODE.get(code) or (code, 'other')
+        # 新浪的 quote_time 只有 '14:33:00'（没有日期），前端统一按
+        # 'YYYY-MM-DD HH:MM:SS' 解析 → 这里把日期拼上，免得详情页只剩"行情"两个字
+        qt = str(r.get('quote_time') or '')
+        qd = str(r.get('quote_date') or '')
+        if qd and qt and ':' in qt and '-' not in qt:
+            qt = qd + ' ' + qt
+        out.append({
+            'secid': 'znb_' + code,
+            'code': code,
+            'name': meta[0],
+            'market': meta[1],
+            'price': r.get('price'),
+            'change_pct': r.get('change_pct'),
+            'change_amt': r.get('change'),
+            'open': r.get('open'),
+            'pre_close': r.get('prev_close'),
+            'high': r.get('high'),
+            'low': r.get('low'),
+            'quote_time': qt,
+            'quote_date': r.get('quote_date'),
+            'quote_hhmm': None,
+        })
+    return out
+
+
+def fetch_all_indices(proxy_url='', max_age=60.0, global_age=None):
+    """全部指数 = 腾讯（中国/港股/美股）+ 新浪外围（亚太/欧洲/加拿大）
+
+    `global_age`：外围市场的缓存时长。线上按交易时段动态给：
+    交易时段给 120 秒（跟得上预警），其余给 1 小时 —— 前端每 60 秒轮询时
+    不会把 Render 一直唤醒（免费实例休眠期间不消耗实例小时）。
+
+    两段各自独立降级：代理挂了，中国和美股照常显示，只是亚太/欧洲变空。
+    """
+    base = fetch_indices(max_age=max_age)
+    try:
+        extra = fetch_global_indices(
+            proxy_url, max_age=global_age or max(max_age, 120.0))
+    except Exception:
+        extra = []
+    return list(base) + extra
