@@ -213,7 +213,13 @@ def yahoo_batch():
 
 @app.route('/api/yahoo_history')
 def yahoo_history():
-    """历史 K 线（给走势图用）：返回 {symbol, range, interval, prev_close, rows:[[date, close]]}"""
+    """历史 K 线（给走势图用）
+
+    返回 {symbol, range, interval, prev_close, market_state,
+          rows: [[date, open, high, low, close], ...]}
+    —— 带上 OHLC，主站那边才能直接转成它自己的 kline 结构（画图要开高低收，
+    只有收盘价的话区间条和振幅就算不出来）。
+    """
     sym = request.args.get('symbol', '')
     rng = request.args.get('range', '1y')
     itv = request.args.get('interval', '1d')
@@ -227,13 +233,24 @@ def yahoo_history():
     meta = r0.get('meta') or {}
     ts = r0.get('timestamp') or []
     q = ((r0.get('indicators') or {}).get('quote') or [{}])[0]
+    opens = q.get('open') or []
+    highs = q.get('high') or []
+    lows = q.get('low') or []
     closes = q.get('close') or []
+
+    def pick(arr, i):
+        v = arr[i] if i < len(arr) else None
+        return round(float(v), 4) if v is not None else None
+
     rows = []
     for i, t in enumerate(ts):
-        c = closes[i] if i < len(closes) else None
+        c = pick(closes, i)
         if c is None:
             continue
-        rows.append([time.strftime('%Y-%m-%d', time.gmtime(t + 8 * 3600)), round(float(c), 4)])
+        rows.append([
+            time.strftime('%Y-%m-%d', time.gmtime(t + 8 * 3600)),
+            pick(opens, i), pick(highs, i), pick(lows, i), c,
+        ])
     return jsonify({
         'symbol': sym, 'range': rng, 'interval': itv,
         'prev_close': meta.get('chartPreviousClose') or meta.get('previousClose'),

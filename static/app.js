@@ -107,7 +107,7 @@ function ixMarket(ix) {
   const s = ix.secid || '';
   if (s.indexOf('us') === 0) return 'us';
   if (s.indexOf('hk') === 0) return 'hk';
-  if (s.indexOf('znb_') === 0) return 'apac';
+  if (s.indexOf('yh_') === 0 || s.indexOf('znb_') === 0) return 'apac';
   return 'cn';
 }
 
@@ -511,21 +511,20 @@ function ixDetailHTML() {
 }
 
 async function openIxDetail(ix) {
-  const isGlobal = (ix.secid || '').indexOf('znb_') === 0;
+  // znb_ = 旧的新浪快照源（无历史 K 线）；yh_ = Yahoo 源，有完整日 K
+  const noHist = (ix.secid || '').indexOf('znb_') === 0;
   const hit = _ixHistCache[ix.secid];
   const cached = hit && (Date.now() - hit.ts < 60000);
   _ixState = { ix, data: hit ? hit.data : null, mode: 'day' };
-  if (isGlobal) {
-    // 外围市场（新浪 znb_ 源）只提供实时快照，没有历史 K 线接口 →
-    // 直接给降级态，不发那次注定失败的请求
+  if (noHist) {
     _ixState.data = { kline: [], minute: { date: '', rows: [] },
-      errors: { kline: '外围市场暂无走势数据（仅提供实时快照）', minute: '' } };
+      errors: { kline: '该行情源暂无走势数据（仅提供实时快照）', minute: '' } };
   }
   if (_ixState.data) _ixState.mode = pickIxMode(_ixState.data);
   $('#ix-detail').innerHTML = ixDetailHTML();
   $('#ix-mask').classList.add('show');
   $('#ix-sheet').classList.add('show');
-  if (cached || isGlobal) return;   // 60 秒内的缓存 / 外围市场：不重复打接口
+  if (cached || noHist) return;   // 60 秒内的缓存 / 无历史源：不重复打接口
   try {
     const d = await api('/api/index_history?secid=' + encodeURIComponent(ix.secid) + '&days=300');
     _ixHistCache[ix.secid] = { ts: Date.now(), data: d };

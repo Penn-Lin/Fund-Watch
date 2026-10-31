@@ -726,13 +726,28 @@ def fetch_index_minute(secid, force=False):
         return hit.get('date') or '', list(hit.get('rows') or []), '分时请求失败：%s' % e
 
 
-def fetch_index_history(secid, days=300):
+def fetch_index_history(secid, days=300, proxy_url=''):
     """给详情页打包：日K + 分时 + 各自的错误（一次请求返回两个系列）
 
     结构：
       {'secid','name','kline':[...], 'minute':{'date','rows'}, 'errors':{'kline','minute'}}
     kline / minute 任一失败都不影响另一个，前端按"有什么画什么"降级。
+
+    `yh_` 前缀 = 外围市场（Yahoo 经 Render）：**只有日 K，没有分时**
+    —— Yahoo 的 chart API 拿不到当天的分钟级序列，所以 minute 恒空。
     """
+    raw = str(secid or '').strip()
+    if raw.startswith('yh_'):
+        code = raw[3:]
+        meta = _GLOBAL_BY_CODE.get(code) or (code, 'other')
+        rows, err = fetch_yahoo_history(proxy_url, code)
+        return {
+            'secid': raw,
+            'name': meta[0],
+            'kline': _tail(rows, days),
+            'minute': {'date': '', 'rows': []},
+            'errors': {'kline': err, 'minute': '外围市场暂无分时数据'},
+        }
     s = _norm_secid(secid)
     if not s:
         raise ValueError('未知的指数代码：%s' % (secid,))
@@ -926,64 +941,191 @@ def fetch_global_via_render(proxy_url, max_age=180.0):
 
 
 # ---------- 展示用分组（前端按这个渲染，组数固定、组内自适应铺满） ----------
-# 中国/港股/美股走腾讯（本地直连 0.1s）；亚太/欧洲/加拿大走新浪（经 Render）。
-# 美洲组是混源的：美股 3 个来自腾讯、加拿大来自新浪 —— 所以分组按 secid 列，
-# 不按数据源列，前端不用关心数据从哪来。
+# 中国/港股/美股走腾讯（本地直连 0.1s）；亚太/欧洲/加拿大走 Yahoo（经 Render）。
+# secid 统一用 `yh_` 前缀表示"外围市场"，**不代表数据源** —— Yahoo 挂了会
+# 降级到新浪，但 secid 不变，前端分组和去重键才不会漂。
+# 美洲组是混源的：美股 3 个来自腾讯、加拿大来自 Yahoo。
 DISPLAY_GROUPS = [
     {'key': 'cn', 'label': '中国', 'secids': [
         'sh000001', 'sz399001', 'sz399006', 'sh000300', 'sh000688',
         'hkHSI', 'hkHSTECH',
     ]},
     {'key': 'apac', 'label': '亚太', 'secids': [
-        'znb_NKY', 'znb_KOSPI', 'znb_TWJQ',
-        'znb_AS51', 'znb_SENSEX', 'znb_FSSTI',
+        'yh_NKY', 'yh_KOSPI', 'yh_TWJQ',
+        'yh_AS51', 'yh_SENSEX', 'yh_FSSTI',
     ]},
     {'key': 'eu', 'label': '欧洲', 'secids': [
-        'znb_UKX', 'znb_DAX', 'znb_CAC',
+        'yh_UKX', 'yh_DAX', 'yh_CAC',
     ]},
     {'key': 'am', 'label': '美洲', 'secids': [
-        'usINX', 'usNDX', 'usDJI', 'znb_SPTSX',
+        'usINX', 'usNDX', 'usDJI', 'yh_SPTSX',
     ]},
 ]
 
 # 参与盘中阈值提醒的外围市场（中国/港股另算；欧美只进早间汇总，不做盘中提醒）
-ALERT_GLOBAL_SECIDS = frozenset([
-    'znb_NKY', 'znb_KOSPI', 'znb_TWJQ',
-    'znb_AS51', 'znb_SENSEX', 'znb_FSSTI',
-])
+ALERT_GLOBAL_CODES = frozenset(['NKY', 'KOSPI', 'TWJQ', 'AS51', 'SENSEX', 'FSSTI'])
 
 _GLOBAL_BY_CODE = {c: (n, m) for c, n, m in SINA_GLOBAL_LIST}
-_GLOBAL_SECID_SET = frozenset('znb_' + c for c in _GLOBAL_BY_CODE)
+_GLOBAL_SECID_SET = frozenset('yh_' + c for c in _GLOBAL_BY_CODE)
+
+
+# ---------- Yahoo（经 Render 转发）----------
+# 为什么用 Yahoo 而不是只用新浪：
+#   · 数据更准 —— 加拿大 TSX 实测 Yahoo 35620 vs 新浪 29761，差 20%（新浪那个源停更了）
+#   · 有历史 K 线 → 外围指数终于能画走势图（新浪只有快照，详情页永远"暂无走势数据"）
+#   · 字段规范（昨收、当日高低、gmtoffset 都给）
+# ⚠️ 阿里云机房访问 Yahoo 会被按 IP 拦成中文 403 页，所以必须经 Render 中转。
+YAHOO_SYMBOLS = {
+    '^N225': ('NKY', '日经225', 'apac'),
+    '^KS11': ('KOSPI', '韩国KOSPI', 'apac'),
+    '^TWII': ('TWJQ', '台湾加权', 'apac'),
+    '^AXJO': ('AS51', '澳洲标普200', 'apac'),
+    '^BSESN': ('SENSEX', '印度SENSEX', 'apac'),
+    '^STI': ('FSSTI', '新加坡海峡', 'apac'),
+    '^FTSE': ('UKX', '英国富时100', 'eu'),
+    '^GDAXI': ('DAX', '德国DAX', 'eu'),
+    '^FCHI': ('CAC', '法国CAC40', 'eu'),
+    '^GSPTSE': ('SPTSX', '加拿大TSX', 'am'),
+}
+YAHOO_BY_CODE = {c: (s, n, m) for s, (c, n, m) in YAHOO_SYMBOLS.items()}
+
+_yahoo_quote_cache = {'ts': 0.0, 'data': {}}
+_yahoo_hist_cache = {}
+
+
+def fetch_yahoo_global(proxy_url, max_age=120.0):
+    """经 Render 转发取 Yahoo 行情，返回 {code: {...}}（失败返回上次缓存/空）"""
+    if not proxy_url:
+        return {}
+    now = time.time()
+    if _yahoo_quote_cache['data'] and now - _yahoo_quote_cache['ts'] < max_age:
+        return _yahoo_quote_cache['data']
+    resp = _http_get(proxy_url.rstrip('/') + '/api/yahoo_batch',
+                     params={'symbols': ','.join(YAHOO_SYMBOLS.keys())},
+                     timeout=30, hard_timeout=90)
+    if resp is None:
+        return _yahoo_quote_cache['data']
+    try:
+        raw = resp.json()
+    except Exception:
+        return _yahoo_quote_cache['data']
+    if not isinstance(raw, dict) or not raw:
+        return _yahoo_quote_cache['data']
+    out = {}
+    for sym, meta in raw.items():
+        if not isinstance(meta, dict):
+            continue
+        code_name_mkt = YAHOO_SYMBOLS.get(sym)
+        if not code_name_mkt:
+            continue
+        code, name, mkt = code_name_mkt
+        price = _f(meta.get('regularMarketPrice'))
+        prev = _f(meta.get('chartPreviousClose')) or _f(meta.get('previousClose'))
+        if price is None:
+            continue
+        chg_amt = (price - prev) if prev else None
+        chg_pct = round((price - prev) / prev * 100.0, 2) if prev else None
+        # 行情日期要用**该市场当地日期**（不是北京日期）：
+        # 美股收盘是北京次日凌晨，用北京时间算会整体错一天，
+        # 而 maybe_eval_indices / _index_session 都拿它判新鲜度。
+        ts = meta.get('regularMarketTime')
+        offset = meta.get('gmtoffset') or 0
+        qd = time.strftime('%Y-%m-%d', time.gmtime(ts + offset)) if ts else ''
+        qt = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(ts + offset)) if ts else ''
+        out[code] = {
+            'code': code, 'name': name, 'market': mkt, 'symbol': sym,
+            'price': price, 'prev_close': prev,
+            'change': round(chg_amt, 4) if chg_amt is not None else None,
+            'change_pct': chg_pct,
+            'open': _f(meta.get('regularMarketOpen')),
+            'high': _f(meta.get('regularMarketDayHigh')),
+            'low': _f(meta.get('regularMarketDayLow')),
+            'quote_date': qd, 'quote_time': qt,
+        }
+    if out:
+        _yahoo_quote_cache['data'] = out
+        _yahoo_quote_cache['ts'] = now
+        return out
+    return _yahoo_quote_cache['data']
+
+
+def fetch_yahoo_history(proxy_url, code, range_='1y'):
+    """外围指数历史日K（经 Render 取 Yahoo），返回 (rows, err)
+
+    rows = [{'date','open','high','low','close'}]，与腾讯 K 线同构。
+    """
+    pair = YAHOO_BY_CODE.get(code)
+    if not pair or not proxy_url:
+        return [], '未知的外围指数 %r' % (code,)
+    sym = pair[0]
+    hit = _yahoo_hist_cache.get(code) or {}
+    if hit.get('rows') and time.time() - hit.get('ts', 0) < 1800:
+        return hit['rows'], None
+    resp = _http_get(proxy_url.rstrip('/') + '/api/yahoo_history',
+                     params={'symbol': sym, 'range': range_, 'interval': '1d'},
+                     timeout=30, hard_timeout=90)
+    if resp is None:
+        return hit.get('rows') or [], '历史数据请求失败（代理超时或熔断中）'
+    try:
+        j = resp.json()
+    except Exception:
+        return hit.get('rows') or [], '历史数据解析失败'
+    rows = []
+    for r in (j.get('rows') or []):
+        if not isinstance(r, (list, tuple)) or len(r) < 5:
+            continue
+        rows.append({'date': r[0], 'open': r[1], 'high': r[2],
+                     'low': r[3], 'close': r[4]})
+    if rows:
+        _yahoo_hist_cache[code] = {'rows': rows, 'ts': time.time()}
+    return rows or (hit.get('rows') or []), (None if rows else '行情源无数据')
 
 
 def fetch_global_indices(proxy_url='', max_age=180.0):
     """外围市场指数，返回结构与 fetch_indices 同构（可直接进预警/汇总）
 
-    只保留 DISPLAY_GROUPS 里用到的代码，36 个里其余的不下发。
+    数据源优先级：**Yahoo（经 Render）→ 新浪（经 Render）→ 空**
+    （Yahoo 更准且有历史 K 线；新浪只作降级，它那个加拿大 TSX 已经停更了）
+    secid 统一用 `yh_<code>`，不随数据源变化 —— 前端分组和去重键才不会漂。
     """
-    rows = fetch_global_via_render(proxy_url, max_age=max_age)
-    if not rows:
+    src = 'yahoo'
+    data = fetch_yahoo_global(proxy_url, max_age=max_age)
+    if not data:
+        # 降级：新浪（快照，无历史）
+        src = 'sina'
+        data = {}
+        for r in (fetch_global_via_render(proxy_url, max_age=max_age) or []):
+            code = r.get('code')
+            if not code:
+                continue
+            meta = _GLOBAL_BY_CODE.get(code) or (code, 'other')
+            data[code] = {
+                'code': code, 'name': meta[0], 'market': meta[1],
+                'price': r.get('price'), 'prev_close': r.get('prev_close'),
+                'change': r.get('change'), 'change_pct': r.get('change_pct'),
+                'open': r.get('open'), 'high': r.get('high'), 'low': r.get('low'),
+                'quote_date': r.get('quote_date'), 'quote_time': r.get('quote_time'),
+            }
+    if not data:
         return []
-    by_code = {r.get('code'): r for r in rows}
-    wanted = [s[4:] for g in DISPLAY_GROUPS for s in g['secids']
-              if s.startswith('znb_')]
+    wanted = [s[3:] for g in DISPLAY_GROUPS for s in g['secids']
+              if s.startswith('yh_')]
     out = []
     for code in wanted:
-        r = by_code.get(code)
+        r = data.get(code)
         if not r or r.get('price') is None:
             continue
-        meta = _GLOBAL_BY_CODE.get(code) or (code, 'other')
-        # 新浪的 quote_time 只有 '14:33:00'（没有日期），前端统一按
-        # 'YYYY-MM-DD HH:MM:SS' 解析 → 这里把日期拼上，免得详情页只剩"行情"两个字
+        # 新浪的 quote_time 只有 '14:33:00'（无日期）→ 补上，否则前端只显示"行情"两字
         qt = str(r.get('quote_time') or '')
         qd = str(r.get('quote_date') or '')
         if qd and qt and ':' in qt and '-' not in qt:
             qt = qd + ' ' + qt
         out.append({
-            'secid': 'znb_' + code,
+            'secid': 'yh_' + code,
             'code': code,
-            'name': meta[0],
-            'market': meta[1],
+            'name': r.get('name') or code,
+            'market': r.get('market') or 'other',
+            'src': src,
             'price': r.get('price'),
             'change_pct': r.get('change_pct'),
             'change_amt': r.get('change'),
@@ -992,7 +1134,7 @@ def fetch_global_indices(proxy_url='', max_age=180.0):
             'high': r.get('high'),
             'low': r.get('low'),
             'quote_time': qt,
-            'quote_date': r.get('quote_date'),
+            'quote_date': qd,
             'quote_hhmm': None,
         })
     return out

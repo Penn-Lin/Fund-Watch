@@ -1513,7 +1513,8 @@ def api_index_history():
     except (TypeError, ValueError):
         days = 300
     try:
-        return jsonify(fund_data.fetch_index_history(secid, days=days))
+        return jsonify(fund_data.fetch_index_history(
+            secid, days=days, proxy_url=os.environ.get('RENDER_PROXY_URL', '')))
     except ValueError as e:
         return jsonify({'error': str(e), 'allowed': sorted(fund_data.ALLOWED_SECIDS)}), 400
     except Exception as e:
@@ -1894,7 +1895,7 @@ def api_global_probe():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.38', 'commit': 'global-indices-ui'})
+    return jsonify({'version': '3.39', 'commit': 'yahoo-primary'})
 
 
 @app.route('/api/threads')
