@@ -17,3 +17,8 @@ ui_*.png
 _probe*
 _git_stat.txt
 _cleanup_check.txt
+_shot_*.py
+_shot_*.png
+_ui_*.png
+_desk_*.png
+_ui_server.log

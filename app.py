@@ -1896,7 +1896,7 @@ def api_global_probe():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.40', 'commit': 'nonblocking-indices'})
+    return jsonify({'version': '3.41', 'commit': 'ui-ink-dashboard'})
 
 
 @app.route('/api/threads')

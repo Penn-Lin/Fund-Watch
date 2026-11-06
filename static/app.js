@@ -61,12 +61,16 @@ async function loadSummary() {
   try {
     const s = await api('/api/summary');
     $('#sum-funds').textContent = s.fund_count;
-    $('#sum-up').textContent = s.up_count;
-    $('#sum-down').textContent = s.down_count;
+    // 0 不上涨跌色：红了 / 绿了都是噪声，数字本身才是信息
+    const upEl = $('#sum-up'), downEl = $('#sum-down');
+    upEl.textContent = s.up_count;
+    upEl.classList.toggle('up', s.up_count > 0);
+    downEl.textContent = s.down_count;
+    downEl.classList.toggle('down', s.down_count > 0);
     $('#sum-alerts').textContent = s.today_alerts;
     $('#last-scan').textContent = s.last_scan
-      ? '最近更新 ' + s.last_scan.slice(5, 16)
-      : '等待数据…';
+      ? '更新 ' + s.last_scan.slice(5, 16)
+      : '读取中';
   } catch (e) { /* 静默 */ }
 }
 
@@ -159,6 +163,14 @@ function renderIndices() {
   // 按区域分组渲染：段头（区域名 + 状态）→ 网格；段与段之间细线分隔。
   // 网格用 6 轨道 + span 控制列数（详见 style.css），数据全在一屏内，不再横滑。
   const groups = ixResolvedGroups();
+
+  // 签名细节：每块数据右上角都有一行等宽小字（行情时刻），全站同一位置
+  const stampEl = $('#ix-stamp');
+  if (stampEl) {
+    const cnFirst = _indices.find((x) => ixMarket(x) === 'cn') || _indices[0];
+    const qt = cnFirst ? fmtQuoteTime(cnFirst.quote_time) : '';
+    stampEl.textContent = qt ? qt.slice(11, 16) + ' 行情' : '';
+  }
 
   box.innerHTML = groups.map((g, gi) => `
     ${gi ? '<div class="ix-sep"></div>' : ''}
@@ -356,7 +368,7 @@ function ixDaySVG(rows) {
   const Y = (v) => PT + (ymax - v) / (ymax - ymin) * (H - PT - PB);
   const first = vals[0], last = vals[vals.length - 1];
   const chg = (last - first) / first * 100;
-  const color = chg >= 0 ? '#e0342f' : '#0a9d5c';
+  const color = chg >= 0 ? '#d33a30' : '#0b8a5e';
   const pts = vals.map((v, i) => X(i).toFixed(1) + ',' + Y(v).toFixed(1)).join(' ');
   const area = PL + ',' + Y(first).toFixed(1) + ' ' + pts + ' '
     + (W - PR) + ',' + Y(first).toFixed(1);
@@ -366,31 +378,33 @@ function ixDaySVG(rows) {
     + ` fill="${color}" stroke="#fff" stroke-width="1.3"/>`;
   const yFirst = Y(first).toFixed(1);
   // 图内文字一律加描边：折线随时可能穿过标签，白描边保证任何位置都读得清
-  const textOut = ' paint-order="stroke" stroke="#fafbfc" stroke-width="3" stroke-linejoin="round"';
+  const textOut = ' paint-order="stroke" stroke="#ffffff" stroke-width="3" stroke-linejoin="round"';
   return `
   <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="近 30 日走势">
     <defs>
       <linearGradient id="ixdg" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="${color}" stop-opacity=".2"/>
+        <stop offset="0%" stop-color="${color}" stop-opacity=".11"/>
         <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
       </linearGradient>
     </defs>
     <polygon points="${area}" fill="url(#ixdg)"/>
     <line x1="${PL}" y1="${yFirst}" x2="${W - PR}" y2="${yFirst}"
-      stroke="#c8cdd6" stroke-width="1" stroke-dasharray="4 4"/>
-    <text x="${W - PR - 2}" y="${Number(yFirst) - 4}" font-size="9" fill="#9ca3af"
+      stroke="#b9c0cb" stroke-width="1" stroke-dasharray="4 4"/>
+    <text x="${W - PR - 2}" y="${Number(yFirst) - 4}" font-size="9" fill="#6b7487"
       text-anchor="end"${textOut}>30 日前 ${num(first)}</text>
     <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.8"
       stroke-linejoin="round" stroke-linecap="round"/>
     ${dot(hiI)}${dot(loI)}
     <circle cx="${X(vals.length - 1).toFixed(1)}" cy="${Y(last).toFixed(1)}" r="3.6"
       fill="${color}" stroke="#fff" stroke-width="1.6"/>
-    <text x="${X(hiI).toFixed(1)}" y="${(Y(vals[hiI]) - 7).toFixed(1)}" font-size="9"
+    <text x="${Math.min(Math.max(X(hiI), PL + 18), W - PR - 18).toFixed(1)}"
+      y="${Math.max(Y(vals[hiI]) - 7, PT + 4).toFixed(1)}" font-size="9"
       fill="${color}" text-anchor="middle"${textOut}>${num(vals[hiI])}</text>
-    <text x="${X(loI).toFixed(1)}" y="${(Y(vals[loI]) + 13).toFixed(1)}" font-size="9"
+    <text x="${Math.min(Math.max(X(loI), PL + 18), W - PR - 18).toFixed(1)}"
+      y="${Math.min(Y(vals[loI]) + 13, H - PB - 2).toFixed(1)}" font-size="9"
       fill="${color}" text-anchor="middle"${textOut}>${num(vals[loI])}</text>
-    <text x="${PL}" y="${H - 6}" font-size="9" fill="#9ca3af">${esc(rows[0].date.slice(5))}</text>
-    <text x="${W - PR}" y="${H - 6}" font-size="9" fill="#9ca3af" text-anchor="end">${esc(rows[rows.length - 1].date.slice(5))}</text>
+    <text x="${PL}" y="${H - 6}" font-size="9" fill="#6b7487">${esc(rows[0].date.slice(5))}</text>
+    <text x="${W - PR}" y="${H - 6}" font-size="9" fill="#6b7487" text-anchor="end">${esc(rows[rows.length - 1].date.slice(5))}</text>
   </svg>`;
 }
 
@@ -407,7 +421,7 @@ function ixMinuteSVG(rows, preClose) {
   const ypc = Y(preClose);
   const last = vals[vals.length - 1];
   const dev = (v) => (v - preClose) / preClose * 100;
-  const color = dev(last) >= 0 ? '#e0342f' : '#0a9d5c';
+  const color = dev(last) >= 0 ? '#d33a30' : '#0b8a5e';
   const line = rows.map((r, i) => X(i).toFixed(1) + ',' + Y(r[1]).toFixed(1)).join(' ');
   const area = X(0).toFixed(1) + ',' + ypc.toFixed(1) + ' ' + line + ' '
     + X(rows.length - 1).toFixed(1) + ',' + ypc.toFixed(1);
@@ -415,36 +429,36 @@ function ixMinuteSVG(rows, preClose) {
   const loI = vals.indexOf(Math.min.apply(null, vals));
   const midI = Math.floor((rows.length - 1) / 2);
   const dotOf = (i) => {
-    const c = dev(vals[i]) >= 0 ? '#e0342f' : '#0a9d5c';
+    const c = dev(vals[i]) >= 0 ? '#d33a30' : '#0b8a5e';
     return `<circle cx="${X(i).toFixed(1)}" cy="${Y(vals[i]).toFixed(1)}" r="3"`
       + ` fill="${c}" stroke="#fff" stroke-width="1.3"/>`;
   };
   const axisText = (i) => (i >= 0 && rows[i]) ? fmtHM(rows[i][0]) : '';
-  const textOut = ' paint-order="stroke" stroke="#fafbfc" stroke-width="3" stroke-linejoin="round"';
+  const textOut = ' paint-order="stroke" stroke="#ffffff" stroke-width="3" stroke-linejoin="round"';
   return `
   <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="当日分时走势">
     <defs>
       <clipPath id="ixmu"><rect x="0" y="0" width="${W}" height="${ypc.toFixed(1)}"/></clipPath>
       <clipPath id="ixmd"><rect x="0" y="${ypc.toFixed(1)}" width="${W}" height="${(H - ypc).toFixed(1)}"/></clipPath>
     </defs>
-    <polygon points="${area}" fill="#e0342f" opacity=".16" clip-path="url(#ixmu)"/>
-    <polygon points="${area}" fill="#0a9d5c" opacity=".16" clip-path="url(#ixmd)"/>
+    <polygon points="${area}" fill="#d33a30" opacity=".16" clip-path="url(#ixmu)"/>
+    <polygon points="${area}" fill="#0b8a5e" opacity=".16" clip-path="url(#ixmd)"/>
     <line x1="${PL}" y1="${ypc.toFixed(1)}" x2="${W - PR}" y2="${ypc.toFixed(1)}"
-      stroke="#c8cdd6" stroke-width="1" stroke-dasharray="4 4"/>
+      stroke="#b9c0cb" stroke-width="1" stroke-dasharray="4 4"/>
     <polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.6"
       stroke-linejoin="round" stroke-linecap="round"/>
     ${dotOf(hiI)}${dotOf(loI)}
     <circle cx="${X(vals.length - 1).toFixed(1)}" cy="${Y(last).toFixed(1)}" r="3.6"
       fill="${color}" stroke="#fff" stroke-width="1.6"/>
-    <text x="${W - PR - 2}" y="${(Number(ypc) - 4).toFixed(1)}" font-size="9" fill="#9ca3af"
+    <text x="${W - PR - 2}" y="${(Number(ypc) - 4).toFixed(1)}" font-size="9" fill="#6b7487"
       text-anchor="end"${textOut}>昨收 ${num(preClose)}</text>
-    <text x="${W - PR + 4}" y="${PT + 3}" font-size="9" fill="#e0342f">+${(spread * 1.12 / preClose * 100).toFixed(2)}%</text>
-    <text x="${W - PR + 4}" y="${(Number(ypc) + 3).toFixed(1)}" font-size="9" fill="#9ca3af">0.00%</text>
-    <text x="${W - PR + 4}" y="${H - PB}" font-size="9" fill="#0a9d5c">-${(spread * 1.12 / preClose * 100).toFixed(2)}%</text>
-    <text x="${PL}" y="${H - 6}" font-size="9" fill="#9ca3af">${axisText(0)}</text>
-    <text x="${X(midI).toFixed(1)}" y="${H - 6}" font-size="9" fill="#9ca3af"
+    <text x="${W - PR + 4}" y="${PT + 3}" font-size="9" fill="#d33a30">+${(spread * 1.12 / preClose * 100).toFixed(2)}%</text>
+    <text x="${W - PR + 4}" y="${(Number(ypc) + 3).toFixed(1)}" font-size="9" fill="#6b7487">0.00%</text>
+    <text x="${W - PR + 4}" y="${H - PB}" font-size="9" fill="#0b8a5e">-${(spread * 1.12 / preClose * 100).toFixed(2)}%</text>
+    <text x="${PL}" y="${H - 6}" font-size="9" fill="#6b7487">${axisText(0)}</text>
+    <text x="${X(midI).toFixed(1)}" y="${H - 6}" font-size="9" fill="#6b7487"
       text-anchor="middle">${axisText(midI)}</text>
-    <text x="${W - PR}" y="${H - 6}" font-size="9" fill="#9ca3af"
+    <text x="${W - PR}" y="${H - 6}" font-size="9" fill="#6b7487"
       text-anchor="end">${axisText(rows.length - 1)}</text>
   </svg>`;
 }
@@ -669,6 +683,13 @@ function heatMix(a, b, t) {
   return '#' + ((1 << 24) + (r << 16) + (g << 8) + bl).toString(16).slice(1);
 }
 
+/** 相对亮度（WCAG）：决定色块文字用白还是深墨 —— 中间调上白字只有 2.6:1，读不清 */
+function heatLum(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const f = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+  return 0.2126 * f(n >> 16 & 255) + 0.7152 * f(n >> 8 & 255) + 0.0722 * f(n & 255);
+}
+
 /** 亿元格式化（保留符号） */
 function heatYi(v) {
   if (v === null || v === undefined || !isFinite(v)) return '—';
@@ -762,7 +783,7 @@ function renderHeat() {
   const mode = _heatMode;
   const src = mode === 'us' ? _heatUs : _heat;
   if (!src.length) {
-    svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" font-size="12" fill="#9ca3af">'
+    svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" font-size="12" fill="#6b7487">'
       + (mode === 'us' ? '美股板块加载中…' : '数据加载中…') + '</text>';
     return;
   }
@@ -786,24 +807,22 @@ function renderHeat() {
     const d = r.d, gap = 1.2;
     const x = r.x + gap / 2, y = r.y + gap / 2;
     const w = Math.max(r.w - gap, 1), h = Math.max(r.h - gap, 1);
-    let fill, white, val;
+    let fill, val;
     if (mode === 'flow') {
       const f = d.net_in || 0;
       const t = Math.min(Math.abs(f) / maxFlow, 1);
-      fill = Math.abs(f) < 0.5 ? '#eef0f3'
-        : (f > 0 ? heatMix('#f7dbd8', '#e0342f', t) : heatMix('#d5ebde', '#0a9d5c', t));
-      white = t >= 0.5;
+      fill = Math.abs(f) < 0.5 ? '#eff1f4'
+        : (f > 0 ? heatMix('#f2d8d5', '#bf3b32', t) : heatMix('#d7e6e0', '#14705a', t));
       val = (f > 0 ? '+' : '') + heatYi(f);
     } else {
       // 涨跌 / 美股：颜色 = 涨跌幅（美股板块波动比 A股 小，3% 满色）
       const t = Math.min(Math.abs(d.chg) / (mode === 'us' ? 3 : 3.5), 1);
-      fill = Math.abs(d.chg) < 0.15 ? '#eef0f3'
-        : (d.chg > 0 ? heatMix('#f7dbd8', '#e0342f', t) : heatMix('#d5ebde', '#0a9d5c', t));
-      white = t >= 0.5;
+      fill = Math.abs(d.chg) < 0.15 ? '#eff1f4'
+        : (d.chg > 0 ? heatMix('#f2d8d5', '#bf3b32', t) : heatMix('#d7e6e0', '#14705a', t));
       val = (d.chg > 0 ? '+' : '') + d.chg.toFixed(2) + '%';
     }
     const cx = x + w / 2, cy = y + h / 2;
-    const tc = white ? '#fff' : '#26303c';
+    const tc = heatLum(fill) < 0.18 ? '#fff' : '#12151b';
     const fit = heatFitLabel(w, h, d.name, val);
     let inner = '';
     if (fit && fit.mode === 'nv') {
@@ -835,7 +854,8 @@ function openSectorDetail(name) {
   const isUs = _heatMode === 'us';
   const d = (isUs ? _heatUs : _heat).find((x) => x.name === name);
   if (!d) return;
-  $('#sec-title').textContent = d.name;
+  // 抽屉头只当"这是什么"，板块名由内容区承担 —— 否则同一个名字出现两次
+  $('#sec-title').textContent = isUs ? '美股板块' : '板块详情';
   if (isUs) {
     const dsc = d.quote_date || '';
     $('#sec-body').innerHTML = `
@@ -943,7 +963,7 @@ function cumProgressHTML(f) {
   <div class="cum-progress">
     <div class="cum-label">
       <span>累计节点 · ${th}%（${dirTxt} ${pct(Math.abs(cum))} / ${th}%）</span>
-      <span>${done ? '★ 已达节点' : '剩 ' + pct(th - Math.abs(cum))}</span>
+      <span>${done ? '已达节点' : '剩 ' + pct(th - Math.abs(cum))}</span>
     </div>
     <div class="bar"><div class="bar-fill ${cum < 0 ? 'g' : ''}" style="width:${p}%"></div></div>
   </div>`;
@@ -952,7 +972,7 @@ function cumProgressHTML(f) {
 function renderFunds(funds) {
   const box = $('#fund-list');
   if (!funds.length) {
-    box.innerHTML = '<div class="empty">暂无监控基金<br>在上方输入代码添加吧</div>';
+    box.innerHTML = '<div class="empty">暂无监控基金<br>点上方「添加基金」输入 6 位代码</div>';
     return;
   }
   box.innerHTML = funds.map((f) => {
@@ -966,7 +986,7 @@ function renderFunds(funds) {
       <div class="fund-main">
         <div class="fund-head">
           <div>
-            <div class="fund-name">${on ? '' : '⏸ '}${esc(f.name || '')}</div>
+            <div class="fund-name">${esc(f.name || '')}${on ? '' : '<span class="fund-flag">已暂停</span>'}</div>
             <div class="fund-code">${f.code}</div>
           </div>
           <div class="fund-big">
@@ -1093,14 +1113,18 @@ function sparkline(hist, baseline) {
   const X = (i) => PL + i / (hist.length - 1) * (W - PL - PR);
   const Y = (v) => PT + (max - v) / (max - min) * (H - PT - PB);
   const up = navs[navs.length - 1] >= navs[0];
-  const color = up ? '#e0342f' : '#0a9d5c';
+  const color = up ? '#d33a30' : '#0b8a5e';
   const pts = hist.map((h, i) => `${X(i).toFixed(1)},${Y(h.nav).toFixed(1)}`).join(' ');
   const areaPts = `${PL},${H - PB} ${pts} ${W - PR},${H - PB}`;
+  // 图内文字统一白描边：折线随时会穿过标签，靠描边保证任何位置都读得清
+  const halo = ' paint-order="stroke" stroke="#ffffff" stroke-width="2.6" stroke-linejoin="round"';
+  // 基准标签放左、最高最低标签做夹紧 —— 原来三者都挤在右边缘，7.636 与 10-14 叠在一起
   const baseLine = (baseline !== null && baseline !== undefined && !isNaN(baseline))
     ? `<line x1="${PL}" y1="${Y(baseline).toFixed(1)}" x2="${W - PR}" y2="${Y(baseline).toFixed(1)}"
-         stroke="#f59e0b" stroke-width="1.2" stroke-dasharray="5 4" opacity=".8"/>
-       <text x="${W - PR}" y="${Y(baseline).toFixed(1) - 4}" font-size="9" fill="#f59e0b" text-anchor="end">基准 ${baseline.toFixed(4)}</text>`
+         stroke="#96590a" stroke-width="1.2" stroke-dasharray="5 4" opacity=".7"/>
+       <text x="${PL}" y="${(Y(baseline) - 5).toFixed(1)}" font-size="9" fill="#96590a"${halo}>基准 ${baseline.toFixed(4)}</text>`
     : '';
+  const clampX = (x) => Math.min(Math.max(x, PL + 18), W - PR - 18);
   const hi = navs.indexOf(Math.max(...navs));
   const lo = navs.indexOf(Math.min(...navs));
   const dot = (i, c) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(navs[i]).toFixed(1)}" r="3" fill="${c}" stroke="#fff" stroke-width="1.2"/>`;
@@ -1108,7 +1132,7 @@ function sparkline(hist, baseline) {
   <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <linearGradient id="g${up ? 'u' : 'd'}" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="${color}" stop-opacity=".22"/>
+        <stop offset="0%" stop-color="${color}" stop-opacity=".1"/>
         <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
       </linearGradient>
     </defs>
@@ -1116,10 +1140,10 @@ function sparkline(hist, baseline) {
     <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
     ${baseLine}
     ${dot(hi, color)}${dot(lo, color)}
-    <text x="${X(hi).toFixed(1)}" y="${(Y(navs[hi]) - 7).toFixed(1)}" font-size="9" fill="${color}" text-anchor="middle">${navs[hi].toFixed(4)}</text>
-    <text x="${X(lo).toFixed(1)}" y="${(Y(navs[lo]) + 13).toFixed(1)}" font-size="9" fill="${color}" text-anchor="middle">${navs[lo].toFixed(4)}</text>
-    <text x="${PL}" y="${H - 6}" font-size="9" fill="#9ca3af">${hist[0].date.slice(5)}</text>
-    <text x="${W - PR}" y="${H - 6}" font-size="9" fill="#9ca3af" text-anchor="end">${hist[hist.length - 1].date.slice(5)}</text>
+    <text x="${clampX(X(hi)).toFixed(1)}" y="${Math.max(Y(navs[hi]) - 7, PT + 4).toFixed(1)}" font-size="9" fill="${color}" text-anchor="middle"${halo}>${navs[hi].toFixed(4)}</text>
+    <text x="${clampX(X(lo)).toFixed(1)}" y="${Math.min(Y(navs[lo]) + 13, H - PB - 2).toFixed(1)}" font-size="9" fill="${color}" text-anchor="middle"${halo}>${navs[lo].toFixed(4)}</text>
+    <text x="${PL}" y="${H - 6}" font-size="9" fill="#6b7487">${hist[0].date.slice(5)}</text>
+    <text x="${W - PR}" y="${H - 6}" font-size="9" fill="#6b7487" text-anchor="end">${hist[hist.length - 1].date.slice(5)}</text>
   </svg>`;
 }
 
@@ -1369,9 +1393,8 @@ async function loadAlerts() {
         <div class="alert-lead">${lead}</div>
         <div class="alert-sub">${sub}</div>
         <div class="alert-tags">
-          <span class="tag">${a.notify_status === 'sent' ? '✓ 已推送' : (a.notify_status === 'failed' ? '推送失败' : a.notify_status)}</span>
+          <span class="tag${a.notify_status === 'failed' ? ' err' : ''}">${a.notify_status === 'sent' ? '已推送' : (a.notify_status === 'failed' ? '推送失败' : a.notify_status)}</span>
         </div>
-        <span class="alert-more">查看详情 →</span>
       </div>`;
     }).join('');
   } catch (e) {
@@ -1396,7 +1419,8 @@ async function loadConfig() {
   const set = cfg.secrets_set || {};
   const wire = (el, configured) => {
     el.value = '';
-    el.placeholder = configured ? SECRET_KEEP : '';
+    // 已配置 → 提示"已保存"；没配置 → 保留 HTML 里的申请地址占位符
+    if (configured) el.placeholder = SECRET_KEEP;
   };
   wire($('#cf-sk'), set.serverchan);
   wire($('#cf-pt'), set.pushplus);
