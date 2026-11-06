@@ -85,6 +85,20 @@ async function loadIndices() {
       _indices = res;
     }
     renderIndices();
+    // 首屏外围（Yahoo）还没回来时只有中国+美洲 —— 后端已在后台抓，
+    // 8 秒后主动补一次，不用干等 60 秒轮询
+    const want = _ixGroups.reduce((n, g) => n + ((g.secids || []).length), 0);
+    if (want && _indices.length < want) {
+      if (!loadIndices._retry) {
+        loadIndices._retry = setTimeout(() => {
+          loadIndices._retry = null;
+          loadIndices();
+        }, 8000);
+      }
+    } else if (loadIndices._retry) {
+      clearTimeout(loadIndices._retry);   // 已补全，撤掉待执行的补拉
+      loadIndices._retry = null;
+    }
     // 指数详情抽屉若开着，跟着刷新实时数字（不重拉历史图：图只跟 min 级变化）
     if (_ixState && $('#ix-sheet').classList.contains('show')) {
       const nx = _indices.find((x) => x.secid === _ixState.ix.secid);
