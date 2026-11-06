@@ -1,6 +1,6 @@
 // Service Worker：Web Push 系统通知 + 基础离线缓存
-// 换图标/换样式后记得把 CACHE 版本号 +1，否则旧缓存会继续被用
-const CACHE = 'fund-monitor-v3';
+// 换图标/换样式/改前端后记得把 CACHE 版本号 +1，否则旧缓存会继续被用
+const CACHE = 'fund-monitor-v4';
 const ASSETS = [
   '/',
   '/static/style.css',
@@ -31,8 +31,20 @@ self.addEventListener('activate', (e) => {
 });
 
 // 网络优先，失败回退缓存（基金数据要新，但离线也能看上次数据）
+//
+// ⚠️ **API 响应绝不进缓存**：接口结构会演进（/api/indices 从「数组」变成
+// 「{rows,groups}」），一旦把旧响应缓存下来，网络抖动时前端拿到的就是旧格式，
+// 解析失败 → 整个指数板块空白（2026-11-06 用户报「晚上指数板块消失」就是这个）。
+// 宁可离线时接口直接失败（前端保留内存里上一次的数据），也不要喂过期结构。
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  let path = '';
+  try {
+    path = new URL(e.request.url).pathname;
+  } catch (err) {
+    path = '';
+  }
+  if (path.indexOf('/api/') === 0 || path.indexOf('/push_') === 0) return;
   e.respondWith(
     fetch(e.request)
       .then((res) => {

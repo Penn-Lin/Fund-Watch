@@ -1441,7 +1441,8 @@ def api_indices():
     groups = fund_data.DISPLAY_GROUPS
     try:
         rows = [dict(ix) for ix in fund_data.fetch_all_indices(
-            os.environ.get('RENDER_PROXY_URL', ''), global_age=_global_cache_age())]
+            os.environ.get('RENDER_PROXY_URL', ''),
+            global_age=_global_cache_age(), non_blocking=True)]
     except Exception:
         return jsonify({'rows': [], 'groups': groups})
     now = rule_engine.now()
@@ -1895,7 +1896,7 @@ def api_global_probe():
 @app.route('/api/version')
 def api_version():
     """返回代码版本，用于确认 Render 部署的是哪个 commit（不碰 DB）"""
-    return jsonify({'version': '3.39', 'commit': 'yahoo-primary'})
+    return jsonify({'version': '3.40', 'commit': 'nonblocking-indices'})
 
 
 @app.route('/api/threads')

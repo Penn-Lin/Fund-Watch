@@ -991,14 +991,53 @@ YAHOO_BY_CODE = {c: (s, n, m) for s, (c, n, m) in YAHOO_SYMBOLS.items()}
 
 _yahoo_quote_cache = {'ts': 0.0, 'data': {}}
 _yahoo_hist_cache = {}
+_yahoo_refresh_lock = threading.Lock()
+_yahoo_refreshing = {'on': False}
 
 
-def fetch_yahoo_global(proxy_url, max_age=120.0):
-    """经 Render 转发取 Yahoo 行情，返回 {code: {...}}（失败返回上次缓存/空）"""
+def _yahoo_refresh_async(proxy_url):
+    """后台刷新 Yahoo 行情（stale-while-revalidate）
+
+    为什么需要：夜里缓存给到 3600 秒，一旦过期，下一个请求就要眼睁睁等
+    Render 免费实例冷启动（5~8 秒，抖起来 20 秒），而这往往正是用户
+    打开页面的第一个请求 → 整块指数空白。
+    现在有旧数据就立刻返回、后台去刷新，用户永远不用等冷启动。
+    """
+    with _yahoo_refresh_lock:
+        if _yahoo_refreshing['on']:
+            return
+        _yahoo_refreshing['on'] = True
+
+    def run():
+        try:
+            fetch_yahoo_global(proxy_url, max_age=0, force=True)
+        except Exception:
+            pass
+        finally:
+            with _yahoo_refresh_lock:
+                _yahoo_refreshing['on'] = False
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def fetch_yahoo_global(proxy_url, max_age=120.0, force=False):
+    """经 Render 转发取 Yahoo 行情，返回 {code: {...}}
+
+    缓存策略：
+      · 未过期           → 直接返回
+      · 过期但有旧数据    → **立刻返回旧数据**，同时后台刷新（不阻塞请求）
+      · 完全没数据        → 同步请求（首次启动只能等，避免整块空白）
+    force=True 供后台刷新线程用：绕开缓存同步抓。
+    """
     if not proxy_url:
         return {}
     now = time.time()
-    if _yahoo_quote_cache['data'] and now - _yahoo_quote_cache['ts'] < max_age:
+    have = bool(_yahoo_quote_cache['data'])
+    fresh = have and now - _yahoo_quote_cache['ts'] < max_age
+    if fresh and not force:
+        return _yahoo_quote_cache['data']
+    if have and not force:
+        _yahoo_refresh_async(proxy_url)
         return _yahoo_quote_cache['data']
     resp = _http_get(proxy_url.rstrip('/') + '/api/yahoo_batch',
                      params={'symbols': ','.join(YAHOO_SYMBOLS.keys())},
@@ -1146,19 +1185,27 @@ def fetch_global_indices(proxy_url='', max_age=180.0):
     return out
 
 
-def fetch_all_indices(proxy_url='', max_age=60.0, global_age=None):
-    """全部指数 = 腾讯（中国/港股/美股）+ 新浪外围（亚太/欧洲/加拿大）
+def fetch_all_indices(proxy_url='', max_age=60.0, global_age=None, non_blocking=False):
+    """全部指数 = 腾讯（中国/港股/美股）+ Yahoo 外围（亚太/欧洲/加拿大）
 
     `global_age`：外围市场的缓存时长。线上按交易时段动态给：
     交易时段给 120 秒（跟得上预警），其余给 1 小时 —— 前端每 60 秒轮询时
     不会把 Render 一直唤醒（免费实例休眠期间不消耗实例小时）。
 
+    `non_blocking=True`（只给展示接口用）：外围一行数据都没有时**不等**代理，
+    先返回腾讯那 10 个，同时后台去抓 —— 用户打开页面永远是秒出，
+    亚太/欧洲下一个轮询周期补上。预警路径必须阻塞（不能拿空数据判阈值）。
+
     两段各自独立降级：代理挂了，中国和美股照常显示，只是亚太/欧洲变空。
     """
     base = fetch_indices(max_age=max_age)
     try:
-        extra = fetch_global_indices(
-            proxy_url, max_age=global_age or max(max_age, 120.0))
+        if non_blocking and proxy_url and not _yahoo_quote_cache['data']:
+            _yahoo_refresh_async(proxy_url)
+            extra = []
+        else:
+            extra = fetch_global_indices(
+                proxy_url, max_age=global_age or max(max_age, 120.0))
     except Exception:
         extra = []
     return list(base) + extra
